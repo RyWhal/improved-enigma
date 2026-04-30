@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://dl8vce6umil5h"]
+
+[ext_resource type="Script" uid="uid://bcmct1bk2bu2y" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://cme4832y3wq8c" path="res://scripts/grid.gd" id="2_grid"]
+[ext_resource type="Script" uid="uid://wgn4ymjwrvtq" path="res://scripts/simulation.gd" id="3_sim"]
+[ext_resource type="Script" uid="uid://c40mal811jp84" path="res://scripts/resources.gd" id="4_res"]
+[ext_resource type="Script" uid="uid://6vtoc4evpdma" path="res://scripts/ui.gd" id="5_ui"]
+
+[node name="Main" type="Node2D" unique_id=1549341396]
+script = ExtResource("1_main")
+
+[node name="Grid" type="Node2D" parent="." unique_id=1081379318]
+script = ExtResource("2_grid")
+
+[node name="Simulation" type="Node" parent="." unique_id=1201539861]
+script = ExtResource("3_sim")
+
+[node name="Resources" type="Node" parent="." unique_id=694466577]
+script = ExtResource("4_res")
+
+[node name="WorldCamera" type="Camera2D" parent="." unique_id=1222945942]
+position = Vector2(1920, 1920)
+zoom = Vector2(0.65, 0.65)
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=31960552]
+script = ExtResource("5_ui")
