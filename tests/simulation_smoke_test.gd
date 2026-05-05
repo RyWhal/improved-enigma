@@ -12,8 +12,10 @@ var failures: int = 0
 
 func _initialize() -> void:
 	randomize()
+	_test_tileset_assets_available()
 	_test_cave_generation()
 	_test_editor_preview_generation()
+	_test_wall_sprites_follow_dug_layout()
 	_test_planning_map_starts_mostly_solid()
 	_test_build_warnings_are_warning_only()
 	await _test_hud_does_not_block_world_input()
@@ -59,6 +61,28 @@ func _require(condition: bool, message: String) -> void:
 		failures += 1
 		push_error(message)
 
+func _test_tileset_assets_available() -> void:
+	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/atlas_floor-16x16.png"), "0x72 floor atlas should be available")
+	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/atlas_walls_low-16x16.png"), "0x72 low wall atlas should be available")
+	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/doors_leaf_closed.png"), "0x72 door sprite should be available")
+	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/chest_full_open_anim_f0.png"), "0x72 treasure chest sprite should be available")
+	for floor_index in range(1, 9):
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/floor_%s.png" % floor_index), "0x72 floor_%s sprite should be available" % floor_index)
+	for frame_index in range(4):
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/big_demon_idle_anim_f%s.png" % frame_index), "0x72 big demon idle frame %s should be available" % frame_index)
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/dwarf_m_run_anim_f%s.png" % frame_index), "0x72 dwarf run frame %s should be available" % frame_index)
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/knight_m_run_anim_f%s.png" % frame_index), "0x72 knight run frame %s should be available" % frame_index)
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/goblin_run_anim_f%s.png" % frame_index), "0x72 goblin run frame %s should be available" % frame_index)
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/skelet_run_anim_f%s.png" % frame_index), "0x72 skeleton run frame %s should be available" % frame_index)
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/floor_spikes_anim_f%s.png" % frame_index), "0x72 floor spike frame %s should be available" % frame_index)
+	for wall_sprite in [
+		"wall_mid", "wall_left", "wall_right", "wall_top_mid", "wall_top_left", "wall_top_right",
+		"wall_edge_bottom_left", "wall_edge_bottom_right", "wall_edge_mid_left", "wall_edge_mid_right",
+		"wall_edge_top_left", "wall_edge_top_right", "wall_edge_left", "wall_edge_right",
+		"wall_outer_front_left", "wall_outer_front_right", "wall_outer_mid_right"
+	]:
+		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/%s.png" % wall_sprite), "0x72 %s sprite should be available" % wall_sprite)
+
 func _test_cave_generation() -> void:
 	var grid = GridScript.new()
 	grid.call("generate_cave")
@@ -74,6 +98,40 @@ func _test_editor_preview_generation() -> void:
 	grid.call("ensure_preview_generated")
 	_require(grid.tiles.size() == 120, "editor preview should generate the grid")
 	_require(grid.call("get_tile", grid.entrance_tile).is_walkable(), "editor preview should show the entrance")
+	grid.free()
+
+func _test_wall_sprites_follow_dug_layout() -> void:
+	var grid = GridScript.new()
+	grid.call("generate_planning_map")
+	var center: Vector2i = grid.start_center
+	grid.call("dig", center)
+	_require(grid.call("_wall_sprite_name_for_coord", center + Vector2i.UP) == "wall_mid", "solid tile directly above dug floor should render as wall face")
+	_require(grid.call("_wall_sprite_name_for_coord", center + Vector2i.UP * 2) == "wall_top_mid", "solid tile two above dug floor should render as wall top")
+	_require(grid.call("_wall_sprite_name_for_coord", center + Vector2i.LEFT) == "wall_edge_left", "solid tile left of dug floor should render as left wall edge")
+	_require(grid.call("_wall_sprite_name_for_coord", center + Vector2i.RIGHT) == "wall_outer_mid_right", "solid tile right of dug floor should render as right outer wall")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(20, 20)) == "", "deep undug stone should not get structural wall sprites")
+	for x in range(center.x, center.x + 3):
+		for y in range(center.y + 4, center.y + 7):
+			grid.call("dig", Vector2i(x, y))
+	var top_face_y := center.y + 3
+	var top_cap_y := center.y + 2
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x, top_face_y)) == "wall_left", "left end of a room top wall face should use wall-left")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 1, top_face_y)) == "wall_mid", "middle of a room top wall face should use wall-middle")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 2, top_face_y)) == "wall_right", "right end of a room top wall face should use wall-right")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x, top_cap_y)) == "wall_top_left", "left end of a room top cap should use top-left")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 1, top_cap_y)) == "wall_top_mid", "middle of a room top cap should use top-middle")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 2, top_cap_y)) == "wall_top_right", "right end of a room top cap should stay a top-right cap")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 3, top_face_y)) == "wall_edge_mid_left", "top-right corner should place a left-facing wall edge beside the top wall face")
+	var bottom_y := center.y + 7
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x, bottom_y)) == "wall_left", "left end of a room bottom wall should use front-left wall")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 1, bottom_y)) == "wall_mid", "middle of a room bottom wall should use middle wall")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 2, bottom_y)) == "wall_right", "right end of a room bottom wall should use front-right wall")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x - 1, center.y + 4)) == "wall_edge_top_left", "upper-left side of a room should use edge top-left")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x - 1, center.y + 5)) == "wall_edge_left", "middle-left side of a room should use edge left")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x - 1, center.y + 6)) == "wall_edge_bottom_left", "lower-left side of a room should use edge bottom-left")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 3, center.y + 4)) == "wall_outer_mid_right", "upper-right side of a room should use outer mid right")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 3, center.y + 5)) == "wall_outer_mid_right", "middle-right side of a room should use outer mid right")
+	_require(grid.call("_wall_sprite_name_for_coord", Vector2i(center.x + 3, center.y + 6)) == "wall_outer_mid_right", "lower-right side of a room should use outer mid right")
 	grid.free()
 
 func _test_planning_map_starts_mostly_solid() -> void:

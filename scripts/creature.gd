@@ -5,6 +5,7 @@ signal clicked(creature: DungeonCreature)
 signal log_event(message: String)
 
 const TILE_SIZE := DungeonGrid.TILE_SIZE
+const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
 
 var species: String = "carrion_mite"
 var tile_pos: Vector2i = Vector2i.ZERO
@@ -15,6 +16,9 @@ var traits: Array[String] = []
 var mutation_pressure: Dictionary = {}
 var move_cooldown: int = 0
 var anim_time: float = 0.0
+var big_demon_frames: Array[Texture2D] = []
+var goblin_run_frames: Array[Texture2D] = []
+var skeleton_run_frames: Array[Texture2D] = []
 
 var species_data := {
 	"spore_root": {"hp": 12.0, "color": Color(0.35, 1.0, 0.43), "traits": ["producer", "stationary", "fungal"]},
@@ -33,6 +37,9 @@ var species_data := {
 	"heart_juvenile": {"hp": 160.0, "color": Color(1.0, 0.20, 0.34), "traits": ["boss", "juvenile", "heartbound"]},
 }
 
+func _ready() -> void:
+	_ensure_sprite_frames_loaded()
+
 func initialize(new_species: String, new_tile_pos: Vector2i) -> void:
 	species = new_species
 	tile_pos = new_tile_pos
@@ -46,6 +53,35 @@ func initialize(new_species: String, new_tile_pos: Vector2i) -> void:
 func _process(delta: float) -> void:
 	anim_time += delta
 	queue_redraw()
+
+func _ensure_sprite_frames_loaded() -> void:
+	if big_demon_frames.size() == 4 and goblin_run_frames.size() == 4 and skeleton_run_frames.size() == 4:
+		return
+	if big_demon_frames.is_empty():
+		for frame_index in range(4):
+			big_demon_frames.append(_load_texture("%s/frames/big_demon_idle_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+	if goblin_run_frames.is_empty():
+		for frame_index in range(4):
+			goblin_run_frames.append(_load_texture("%s/frames/goblin_run_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+	if skeleton_run_frames.is_empty():
+		for frame_index in range(4):
+			skeleton_run_frames.append(_load_texture("%s/frames/skelet_run_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+
+func _load_texture(path: String) -> Texture2D:
+	if ResourceLoader.exists(path):
+		var imported := ResourceLoader.load(path)
+		if imported is Texture2D:
+			return imported
+	if not FileAccess.file_exists(path):
+		return null
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return null
+	var bytes := file.get_buffer(file.get_length())
+	var image := Image.new()
+	if image.load_png_from_buffer(bytes) != OK:
+		return null
+	return ImageTexture.create_from_image(image)
 
 func _update_world_position() -> void:
 	position = Vector2(tile_pos.x * TILE_SIZE + TILE_SIZE * 0.5, tile_pos.y * TILE_SIZE + TILE_SIZE * 0.5)
@@ -263,11 +299,23 @@ func mutation_summary() -> String:
 	return ", ".join(parts)
 
 func _draw() -> void:
+	_ensure_sprite_frames_loaded()
 	var data: Dictionary = species_data.get(species, species_data["carrion_mite"])
 	var color: Color = data["color"]
 	var bob := sin(anim_time * 5.0 + tile_pos.x) * 1.8
 	var radius := 7.0
-	if species == "spore_root":
+	if species.begins_with("heart_") and big_demon_frames.size() == 4:
+		var frame := int(floor(anim_time * 5.0)) % big_demon_frames.size()
+		var scale := 1.35 if species == "heart_juvenile" else 1.1
+		var size := Vector2(32, 36) * scale
+		draw_texture_rect(big_demon_frames[frame], Rect2(Vector2(-size.x * 0.5, -size.y + 11.0 + bob), size), false)
+	elif species == "goblin" and goblin_run_frames.size() == 4:
+		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % goblin_run_frames.size()
+		draw_texture_rect(goblin_run_frames[frame], Rect2(Vector2(-13, -18 + bob), Vector2(26, 26)), false)
+	elif species == "hex_goblin" and goblin_run_frames.size() == 4:
+		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % goblin_run_frames.size()
+		draw_texture_rect(goblin_run_frames[frame], Rect2(Vector2(-13, -18 + bob), Vector2(26, 26)), false, Color(0.86, 0.58, 1.0, 1.0))
+	elif species == "spore_root":
 		draw_circle(Vector2(0, bob), 7.0, color.darkened(0.25))
 		draw_circle(Vector2(-5, -4 + bob), 4.0, Color(0.65, 1.0, 0.52, 0.9))
 		draw_circle(Vector2(5, -3 + bob), 3.2, Color(0.48, 1.0, 0.74, 0.75))
@@ -277,12 +325,17 @@ func _draw() -> void:
 		if species == "oracle_slug":
 			draw_circle(Vector2(3, -3 + bob), 2.2, Color(0.95, 0.78, 1.0))
 	elif species.contains("mite"):
-		radius = 8.0 if species == "bloat_mite" else 6.5
-		draw_circle(Vector2(0, bob), radius, color)
-		for i in range(4):
-			var side := -1.0 if i < 2 else 1.0
-			var y := -4.0 + float(i % 2) * 8.0 + bob
-			draw_line(Vector2(side * 3.0, y), Vector2(side * 10.0, y + sin(anim_time * 8.0 + i) * 2.0), color.lightened(0.25), 1.5)
+		if skeleton_run_frames.size() == 4:
+			var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % skeleton_run_frames.size()
+			var tint := Color(1, 1, 1, 1)
+			if species == "bloat_mite" or species == "bog_mite":
+				tint = Color(0.62, 1.0, 0.70, 1.0)
+			elif species == "ember_mite":
+				tint = Color(1.0, 0.58, 0.34, 1.0)
+			draw_texture_rect(skeleton_run_frames[frame], Rect2(Vector2(-12, -17 + bob), Vector2(24, 24)), false, tint)
+		else:
+			radius = 8.0 if species == "bloat_mite" else 6.5
+			draw_circle(Vector2(0, bob), radius, color)
 	else:
 		draw_colored_polygon(PackedVector2Array([Vector2(0, -10 + bob), Vector2(13, 4 + bob), Vector2(0, 0 + bob), Vector2(-13, 4 + bob)]), color)
 		draw_line(Vector2(-5, 1 + bob), Vector2(5, 1 + bob), Color(0.95, 0.95, 1.0, 0.8), 1.2)

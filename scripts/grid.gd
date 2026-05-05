@@ -7,6 +7,28 @@ signal hovered_tile_changed(coord: Vector2i)
 const DungeonTileScript = preload("res://scripts/tile_data.gd")
 const GRID_SIZE: int = 120
 const TILE_SIZE: int = 32
+const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
+const FLOOR_REGIONS := [
+	Rect2(0, 0, 16, 16),
+	Rect2(16, 0, 16, 16),
+	Rect2(32, 0, 16, 16),
+	Rect2(48, 0, 16, 16),
+	Rect2(0, 16, 16, 16),
+	Rect2(16, 16, 16, 16),
+	Rect2(32, 16, 16, 16),
+	Rect2(48, 16, 16, 16),
+]
+const STONE_REGIONS := [
+	Rect2(0, 0, 16, 16),
+	Rect2(16, 0, 16, 16),
+	Rect2(32, 0, 16, 16),
+	Rect2(48, 0, 16, 16),
+	Rect2(0, 16, 16, 16),
+	Rect2(16, 16, 16, 16),
+	Rect2(32, 16, 16, 16),
+	Rect2(48, 16, 16, 16),
+]
+const OUTER_WALL_REGION := Rect2(32, 0, 16, 16)
 
 var tiles: Array = []
 var overlay_mode: String = "normal"
@@ -15,11 +37,57 @@ var entrance_tile: Vector2i = Vector2i(0, 60)
 var start_center: Vector2i = Vector2i(60, 60)
 var shimmer_time: float = 0.0
 var next_den_id: int = 1
+var dungeon_floor_tileset: Texture2D
+var dungeon_wall_tileset: Texture2D
+var dungeon_door_texture: Texture2D
+var dungeon_treasure_texture: Texture2D
+var dungeon_floor_textures: Array[Texture2D] = []
+var dungeon_spike_textures: Array[Texture2D] = []
+var dungeon_wall_textures: Dictionary = {}
 
 func _ready() -> void:
+	_ensure_tilesets_loaded()
 	set_process(true)
 	if Engine.is_editor_hint():
 		ensure_preview_generated()
+
+func _ensure_tilesets_loaded() -> void:
+	if dungeon_floor_tileset != null and dungeon_wall_tileset != null and dungeon_door_texture != null and dungeon_treasure_texture != null and dungeon_floor_textures.size() == 8 and dungeon_spike_textures.size() == 4 and dungeon_wall_textures.size() == 17:
+		return
+	dungeon_floor_tileset = _load_texture("%s/atlas_floor-16x16.png" % TILESET_ROOT)
+	dungeon_wall_tileset = _load_texture("%s/atlas_walls_low-16x16.png" % TILESET_ROOT)
+	dungeon_door_texture = _load_texture("%s/frames/doors_leaf_closed.png" % TILESET_ROOT)
+	dungeon_treasure_texture = _load_texture("%s/frames/chest_full_open_anim_f0.png" % TILESET_ROOT)
+	if dungeon_floor_textures.is_empty():
+		for floor_index in range(1, 9):
+			dungeon_floor_textures.append(_load_texture("%s/frames/floor_%s.png" % [TILESET_ROOT, floor_index]))
+	if dungeon_spike_textures.is_empty():
+		for frame_index in range(4):
+			dungeon_spike_textures.append(_load_texture("%s/frames/floor_spikes_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+	if dungeon_wall_textures.is_empty():
+		for sprite_name in [
+			"wall_mid", "wall_left", "wall_right", "wall_top_mid", "wall_top_left", "wall_top_right",
+			"wall_edge_bottom_left", "wall_edge_bottom_right", "wall_edge_mid_left", "wall_edge_mid_right",
+			"wall_edge_top_left", "wall_edge_top_right", "wall_edge_left", "wall_edge_right",
+			"wall_outer_front_left", "wall_outer_front_right", "wall_outer_mid_right"
+		]:
+			dungeon_wall_textures[sprite_name] = _load_texture("%s/frames/%s.png" % [TILESET_ROOT, sprite_name])
+
+func _load_texture(path: String) -> Texture2D:
+	if ResourceLoader.exists(path):
+		var imported := ResourceLoader.load(path)
+		if imported is Texture2D:
+			return imported
+	if not FileAccess.file_exists(path):
+		return null
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return null
+	var bytes := file.get_buffer(file.get_length())
+	var image := Image.new()
+	if image.load_png_from_buffer(bytes) != OK:
+		return null
+	return ImageTexture.create_from_image(image)
 
 func ensure_preview_generated() -> void:
 	if tiles.is_empty():
@@ -396,6 +464,7 @@ func _process(delta: float) -> void:
 func _draw() -> void:
 	if tiles.is_empty():
 		return
+	_ensure_tilesets_loaded()
 	for x in range(GRID_SIZE):
 		for y in range(GRID_SIZE):
 			var coord := Vector2i(x, y)
@@ -449,16 +518,109 @@ func _draw_tile_texture(coord: Vector2i, rect: Rect2) -> void:
 	if overlay_mode != "normal":
 		return
 	var tile: DungeonTileData = get_tile(coord)
-	if tile.kind == DungeonTileScript.Kind.STONE:
-		var fleck_alpha := 0.08 + float((coord.x * 17 + coord.y * 31) % 5) * 0.018
-		draw_line(rect.position + Vector2(5, 9 + (coord.x % 4)), rect.position + Vector2(15, 7 + (coord.y % 5)), Color(0.58, 0.42, 0.28, fleck_alpha), 1.0)
-		draw_line(rect.position + Vector2(18, 22), rect.position + Vector2(28, 18 + (coord.x % 3)), Color(0.11, 0.07, 0.04, 0.12), 1.0)
+	if tile.kind == DungeonTileScript.Kind.WALL:
+		var solid_wall_texture := _wall_texture(coord)
+		if solid_wall_texture != null:
+			draw_texture_rect(solid_wall_texture, rect, false, _wall_tint(coord, true))
+		elif dungeon_wall_tileset != null:
+			draw_texture_rect_region(dungeon_wall_tileset, rect, OUTER_WALL_REGION, Color(0.82, 0.78, 0.72, 0.95))
+	elif tile.kind == DungeonTileScript.Kind.STONE:
+		var stone_texture := _wall_texture(coord)
+		if stone_texture != null:
+			draw_texture_rect(stone_texture, rect, false, _wall_tint(coord, false))
 	elif tile.is_walkable():
-		var mortar := Color(0.13, 0.12, 0.11, 0.42)
-		draw_line(rect.position + Vector2(0, 16), rect.position + Vector2(TILE_SIZE, 16), mortar, 1.0)
-		draw_line(rect.position + Vector2(16, 0), rect.position + Vector2(16, 16), mortar, 1.0)
-		draw_line(rect.position + Vector2(8, 16), rect.position + Vector2(8, TILE_SIZE), mortar, 1.0)
-		draw_line(rect.position + Vector2(24, 16), rect.position + Vector2(24, TILE_SIZE), mortar, 1.0)
+		var floor_texture := _floor_texture(coord)
+		if floor_texture != null:
+			draw_texture_rect(floor_texture, rect, false, Color(0.88, 0.86, 0.82, 0.96))
+		elif dungeon_floor_tileset != null:
+			draw_texture_rect_region(dungeon_floor_tileset, rect, _floor_region(coord), Color(0.86, 0.84, 0.82, 0.96))
+
+func _floor_region(coord: Vector2i) -> Rect2:
+	return FLOOR_REGIONS[abs((coord.x * 19 + coord.y * 31) % FLOOR_REGIONS.size())]
+
+func _stone_region(coord: Vector2i) -> Rect2:
+	return STONE_REGIONS[abs((coord.x * 23 + coord.y * 13) % STONE_REGIONS.size())]
+
+func _floor_texture(coord: Vector2i) -> Texture2D:
+	if dungeon_floor_textures.is_empty():
+		return null
+	var hash: int = abs(coord.x * 19 + coord.y * 31)
+	var roll: int = hash % 20
+	var index: int = roll % 3
+	if roll >= 15:
+		index = 3 + (hash % 5)
+	return dungeon_floor_textures[index]
+
+func _wall_texture(coord: Vector2i) -> Texture2D:
+	var sprite_name := _wall_sprite_name_for_coord(coord)
+	if sprite_name == "" or not dungeon_wall_textures.has(sprite_name):
+		return null
+	return dungeon_wall_textures[sprite_name]
+
+func _wall_sprite_name_for_coord(coord: Vector2i) -> String:
+	if not is_in_bounds(coord):
+		return ""
+	var tile: DungeonTileData = get_tile(coord)
+	if tile.is_walkable():
+		return ""
+	var open_above := _is_layout_floor(coord + Vector2i.UP)
+	var open_below := _is_layout_floor(coord + Vector2i.DOWN)
+	var open_left := _is_layout_floor(coord + Vector2i.LEFT)
+	var open_right := _is_layout_floor(coord + Vector2i.RIGHT)
+	var floor_above_left := _is_layout_floor(coord + Vector2i.UP + Vector2i.LEFT)
+	var floor_above_right := _is_layout_floor(coord + Vector2i.UP + Vector2i.RIGHT)
+	var floor_below_left := _is_layout_floor(coord + Vector2i.DOWN + Vector2i.LEFT)
+	var floor_below_right := _is_layout_floor(coord + Vector2i.DOWN + Vector2i.RIGHT)
+	var floor_two_below := _is_layout_floor(coord + Vector2i.DOWN * 2)
+	var floor_two_below_left := _is_layout_floor(coord + Vector2i.DOWN * 2 + Vector2i.LEFT)
+	var floor_two_below_right := _is_layout_floor(coord + Vector2i.DOWN * 2 + Vector2i.RIGHT)
+	if floor_two_below and not open_below:
+		if not floor_two_below_left and floor_two_below_right:
+			return "wall_top_left"
+		if floor_two_below_left and not floor_two_below_right:
+			return "wall_top_right"
+		return "wall_top_mid"
+	if floor_below_left and not floor_below_right and not open_above and not open_below and not open_left and not open_right:
+		return "wall_edge_mid_left"
+	if not open_above and not open_below and not open_left and not open_right:
+		return ""
+	if open_below:
+		if not floor_below_left and floor_below_right:
+			return "wall_left"
+		if floor_below_left and not floor_below_right:
+			return "wall_right"
+		return "wall_mid"
+	if open_above:
+		if not floor_above_left and floor_above_right:
+			return "wall_left"
+		if floor_above_left and not floor_above_right:
+			return "wall_right"
+		return "wall_mid"
+	if open_right:
+		var floor_right_up := _is_layout_floor(coord + Vector2i.RIGHT + Vector2i.UP)
+		var floor_right_down := _is_layout_floor(coord + Vector2i.RIGHT + Vector2i.DOWN)
+		if not floor_right_up and floor_right_down:
+			return "wall_edge_top_left"
+		if floor_right_up and not floor_right_down:
+			return "wall_edge_bottom_left"
+		return "wall_edge_left"
+	if open_left:
+		return "wall_outer_mid_right"
+	return "wall_mid"
+
+func _is_layout_floor(coord: Vector2i) -> bool:
+	if not is_in_bounds(coord):
+		return false
+	var tile: DungeonTileData = get_tile(coord)
+	return tile.is_walkable()
+
+func _wall_tint(coord: Vector2i, solid_border: bool) -> Color:
+	var hash: int = abs(coord.x * 47 + coord.y * 17)
+	var shade := 0.92 + float(hash % 7) * 0.018
+	var base := Color(0.58, 0.48, 0.38, 0.78)
+	if solid_border:
+		base = Color(0.68, 0.60, 0.50, 0.92)
+	return Color(base.r * shade, base.g * shade, base.b * shade, base.a)
 
 func _draw_tile_effects(coord: Vector2i, rect: Rect2) -> void:
 	var tile = get_tile(coord)
@@ -493,12 +655,16 @@ func _draw_structure(tile: DungeonTileData, center: Vector2) -> void:
 				draw_rect(Rect2(bar_rect.position, Vector2(fill_width, 4)), Color(1.0, 0.12, 0.18, 0.95), true)
 				draw_rect(bar_rect, Color(1.0, 0.75, 0.75, 0.65), false, 1.0)
 		"treasure":
-			draw_rect(Rect2(center - Vector2(7, 5), Vector2(14, 10)), Color(0.92, 0.66, 0.18, 0.95), true)
-			draw_line(center + Vector2(-6, -1), center + Vector2(6, -1), Color(1.0, 0.90, 0.42, 0.9), 1.4)
+			if dungeon_treasure_texture != null:
+				draw_texture_rect(dungeon_treasure_texture, Rect2(center - Vector2(12, 12), Vector2(24, 24)), false)
 		"trap":
-			for i in range(3):
-				var x := -7.0 + i * 7.0
-				draw_polygon(PackedVector2Array([center + Vector2(x, 6), center + Vector2(x + 3, -6), center + Vector2(x + 6, 6)]), PackedColorArray([Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72)]))
+			if dungeon_spike_textures.size() == 4:
+				var frame := int(floor(shimmer_time * 5.0)) % dungeon_spike_textures.size()
+				draw_texture_rect(dungeon_spike_textures[frame], Rect2(center - Vector2(14, 14), Vector2(28, 28)), false)
+			else:
+				for i in range(3):
+					var x := -7.0 + i * 7.0
+					draw_polygon(PackedVector2Array([center + Vector2(x, 6), center + Vector2(x + 3, -6), center + Vector2(x + 6, 6)]), PackedColorArray([Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72)]))
 		"door":
-			draw_rect(Rect2(center - Vector2(9, 11), Vector2(18, 22)), Color(0.42, 0.24, 0.12, 0.95), true)
-			draw_line(center + Vector2(-7, -8), center + Vector2(7, -8), Color(0.72, 0.48, 0.26, 0.8), 1.2)
+			if dungeon_door_texture != null:
+				draw_texture_rect(dungeon_door_texture, Rect2(center - Vector2(16, 19), Vector2(32, 32)), false)

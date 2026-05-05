@@ -4,6 +4,7 @@ extends Node2D
 signal log_event(message: String)
 
 const TILE_SIZE := DungeonGrid.TILE_SIZE
+const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
 
 var role: String = "looter"
 var tile_pos: Vector2i = Vector2i.ZERO
@@ -17,12 +18,17 @@ var door_delay: int = 0
 var explored_doors: Dictionary = {}
 var previous_tile_pos: Vector2i = Vector2i(-1, -1)
 var committed_door_target: Vector2i = Vector2i(-1, -1)
+var dwarf_run_frames: Array[Texture2D] = []
+var knight_run_frames: Array[Texture2D] = []
 
 var role_data := {
 	"looter": {"color": Color(0.95, 0.80, 0.38), "traits": ["seeks treasure", "steals essence"]},
 	"torchbearer": {"color": Color(1.0, 0.48, 0.12), "traits": ["burns fungus", "reduces darkness"]},
 	"hunter": {"color": Color(0.78, 0.84, 0.94), "traits": ["attacks creatures", "keeps nerve"]},
 }
+
+func _ready() -> void:
+	_ensure_sprite_frames_loaded()
 
 func initialize(new_role: String, start_tile: Vector2i, target_tile: Vector2i) -> void:
 	role = new_role
@@ -36,6 +42,32 @@ func share_exploration_memory(memory: Dictionary) -> void:
 func _process(delta: float) -> void:
 	anim_time += delta
 	queue_redraw()
+
+func _ensure_sprite_frames_loaded() -> void:
+	if dwarf_run_frames.size() == 4 and knight_run_frames.size() == 4:
+		return
+	if dwarf_run_frames.is_empty():
+		for frame_index in range(4):
+			dwarf_run_frames.append(_load_texture("%s/frames/dwarf_m_run_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+	if knight_run_frames.is_empty():
+		for frame_index in range(4):
+			knight_run_frames.append(_load_texture("%s/frames/knight_m_run_anim_f%s.png" % [TILESET_ROOT, frame_index]))
+
+func _load_texture(path: String) -> Texture2D:
+	if ResourceLoader.exists(path):
+		var imported := ResourceLoader.load(path)
+		if imported is Texture2D:
+			return imported
+	if not FileAccess.file_exists(path):
+		return null
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return null
+	var bytes := file.get_buffer(file.get_length())
+	var image := Image.new()
+	if image.load_png_from_buffer(bytes) != OK:
+		return null
+	return ImageTexture.create_from_image(image)
 
 func simulate_step(grid: DungeonGrid, creatures: Array, resources: DungeonResources) -> void:
 	is_attacking = false
@@ -284,20 +316,24 @@ func _update_world_position() -> void:
 	position = Vector2(tile_pos.x * TILE_SIZE + TILE_SIZE * 0.5, tile_pos.y * TILE_SIZE + TILE_SIZE * 0.5)
 
 func _draw() -> void:
+	_ensure_sprite_frames_loaded()
 	var data: Dictionary = role_data.get(role, role_data["looter"])
 	var color: Color = data["color"]
 	if is_attacking:
 		color = Color(1.0, 0.16, 0.10)
 	var bob := sin(anim_time * 6.0) * 1.4
 	_draw_debug_path()
-	draw_circle(Vector2(0, -4 + bob), 4.5, color.lightened(0.18))
-	draw_rect(Rect2(-5, 0 + bob, 10, 11), color, true)
-	if role == "torchbearer":
-		draw_line(Vector2(7, 2 + bob), Vector2(12, -8 + bob), Color(0.98, 0.76, 0.32), 2.0)
-		draw_circle(Vector2(13, -10 + bob), 4.0, Color(1.0, 0.34, 0.08, 0.8))
-	elif role == "hunter":
-		draw_line(Vector2(-11, 7 + bob), Vector2(12, -6 + bob), Color(0.90, 0.94, 1.0), 1.8)
+	var frames := knight_run_frames if role == "hunter" else dwarf_run_frames
+	if frames.size() == 4:
+		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % frames.size()
+		var tint := Color(1, 1, 1, 1) if not is_attacking else Color(1.0, 0.45, 0.35, 1.0)
+		draw_texture_rect(frames[frame], Rect2(Vector2(-12, -26 + bob), Vector2(24, 42)), false, tint)
 	else:
+		draw_circle(Vector2(0, -4 + bob), 4.5, color.lightened(0.18))
+		draw_rect(Rect2(-5, 0 + bob, 10, 11), color, true)
+	if role == "hunter":
+		draw_line(Vector2(-11, 7 + bob), Vector2(12, -6 + bob), Color(0.90, 0.94, 1.0), 1.8)
+	elif role == "looter":
 		draw_circle(Vector2(7, 7 + bob), 3.0, Color(1.0, 0.92, 0.48))
 
 func _draw_debug_path() -> void:
