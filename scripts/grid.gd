@@ -5,9 +5,13 @@ extends Node2D
 signal hovered_tile_changed(coord: Vector2i)
 
 const DungeonTileScript = preload("res://scripts/tile_data.gd")
-const GRID_SIZE: int = 120
+const GRID_SIZE: int = 128
+const CHUNK_SIZE: int = 32
+const CHUNKS_PER_AXIS: int = 4
 const TILE_SIZE: int = 32
 const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
+const ATLAS_TILE_SIZE: int = 16
+const TILEMAP_LAYER_SCALE := Vector2(float(TILE_SIZE) / float(ATLAS_TILE_SIZE), float(TILE_SIZE) / float(ATLAS_TILE_SIZE))
 const FLOOR_REGIONS := [
 	Rect2(0, 0, 16, 16),
 	Rect2(16, 0, 16, 16),
@@ -29,14 +33,51 @@ const STONE_REGIONS := [
 	Rect2(48, 16, 16, 16),
 ]
 const OUTER_WALL_REGION := Rect2(32, 0, 16, 16)
+const FLOOR_ATLAS_COORDS := [
+	Vector2i(0, 0),
+	Vector2i(1, 0),
+	Vector2i(2, 0),
+	Vector2i(0, 1),
+	Vector2i(1, 1),
+	Vector2i(2, 1),
+	Vector2i(0, 2),
+	Vector2i(1, 2),
+]
+const WALL_TERRAIN_MASK_ROWS := [
+	["000010010", "000011010", "000111010", "000110010", "110111010", "000111011", "000111110", "011111010", "000011011", "010111111", "000111111", "000110110"],
+	["010010010", "010011010", "010111010", "010110010", "010011011", "011111111", "110111111", "010110110", "011011011", "011111110", "000000000", "110111110"],
+	["010010000", "010011000", "010111000", "010110000", "011011010", "111111011", "111111110", "110110010", "011111011", "111111111", "110111011", "110110110"],
+	["000010000", "000011000", "000111000", "000110000", "010111110", "011111000", "110111000", "010111011", "011011000", "111111000", "111111010", "110110000"],
+]
+const TERRAIN_MASK_PEERING_BITS := [
+	TileSet.CELL_NEIGHBOR_TOP_LEFT_CORNER,
+	TileSet.CELL_NEIGHBOR_TOP_SIDE,
+	TileSet.CELL_NEIGHBOR_TOP_RIGHT_CORNER,
+	TileSet.CELL_NEIGHBOR_LEFT_SIDE,
+	-1,
+	TileSet.CELL_NEIGHBOR_RIGHT_SIDE,
+	TileSet.CELL_NEIGHBOR_BOTTOM_LEFT_CORNER,
+	TileSet.CELL_NEIGHBOR_BOTTOM_SIDE,
+	TileSet.CELL_NEIGHBOR_BOTTOM_RIGHT_CORNER,
+]
+const WALL_SPRITE_NAMES := [
+	"wall_mid", "wall_left", "wall_right", "wall_top_mid", "wall_top_left", "wall_top_right",
+	"wall_edge_bottom_left", "wall_edge_bottom_right", "wall_edge_left", "wall_edge_right",
+	"wall_edge_mid_left", "wall_edge_mid_right", "wall_edge_top_left", "wall_edge_top_right",
+	"wall_edge_tshape_bottom_left", "wall_edge_tshape_bottom_right", "wall_edge_tshape_left", "wall_edge_tshape_right",
+	"wall_outer_front_left", "wall_outer_front_right", "wall_outer_mid_left", "wall_outer_mid_right",
+	"wall_outer_top_left", "wall_outer_top_right",
+]
 
 var tiles: Array = []
 var overlay_mode: String = "normal"
 var hovered_tile: Vector2i = Vector2i(-1, -1)
-var entrance_tile: Vector2i = Vector2i(0, 60)
-var start_center: Vector2i = Vector2i(60, 60)
+var start_chunk: Vector2i = Vector2i(0, 1)
+var entrance_tile: Vector2i = Vector2i(0, 48)
+var start_center: Vector2i = Vector2i(16, 48)
 var shimmer_time: float = 0.0
 var next_den_id: int = 1
+var unlocked_chunks: Dictionary = {}
 var dungeon_floor_tileset: Texture2D
 var dungeon_wall_tileset: Texture2D
 var dungeon_door_texture: Texture2D
@@ -44,15 +85,29 @@ var dungeon_treasure_texture: Texture2D
 var dungeon_floor_textures: Array[Texture2D] = []
 var dungeon_spike_textures: Array[Texture2D] = []
 var dungeon_wall_textures: Dictionary = {}
+var floor_tile_layer: TileMapLayer
+var wall_backing_layer: TileMapLayer
+var wall_tile_layer: TileMapLayer
+var floor_tile_set: TileSet
+var wall_backing_tile_set: TileSet
+var wall_tile_set: TileSet
+var tilemap_layers_dirty: bool = true
+var tilemap_full_refresh_pending: bool = true
+var tilemap_dirty_cells: Dictionary = {}
+var tilemap_batch_depth: int = 0
+var tilemap_batched_full_refresh: bool = false
+var tilemap_batched_chunks: Dictionary = {}
+var drag_preview_tiles: Dictionary = {}
 
 func _ready() -> void:
 	_ensure_tilesets_loaded()
+	_ensure_tilemap_layers()
 	set_process(true)
 	if Engine.is_editor_hint():
 		ensure_preview_generated()
 
 func _ensure_tilesets_loaded() -> void:
-	if dungeon_floor_tileset != null and dungeon_wall_tileset != null and dungeon_door_texture != null and dungeon_treasure_texture != null and dungeon_floor_textures.size() == 8 and dungeon_spike_textures.size() == 4 and dungeon_wall_textures.size() == 17:
+	if dungeon_floor_tileset != null and dungeon_wall_tileset != null and dungeon_door_texture != null and dungeon_treasure_texture != null and dungeon_floor_textures.size() == 8 and dungeon_spike_textures.size() == 4 and dungeon_wall_textures.size() == WALL_SPRITE_NAMES.size():
 		return
 	dungeon_floor_tileset = _load_texture("%s/atlas_floor-16x16.png" % TILESET_ROOT)
 	dungeon_wall_tileset = _load_texture("%s/atlas_walls_low-16x16.png" % TILESET_ROOT)
@@ -65,12 +120,7 @@ func _ensure_tilesets_loaded() -> void:
 		for frame_index in range(4):
 			dungeon_spike_textures.append(_load_texture("%s/frames/floor_spikes_anim_f%s.png" % [TILESET_ROOT, frame_index]))
 	if dungeon_wall_textures.is_empty():
-		for sprite_name in [
-			"wall_mid", "wall_left", "wall_right", "wall_top_mid", "wall_top_left", "wall_top_right",
-			"wall_edge_bottom_left", "wall_edge_bottom_right", "wall_edge_mid_left", "wall_edge_mid_right",
-			"wall_edge_top_left", "wall_edge_top_right", "wall_edge_left", "wall_edge_right",
-			"wall_outer_front_left", "wall_outer_front_right", "wall_outer_mid_right"
-		]:
+		for sprite_name in WALL_SPRITE_NAMES:
 			dungeon_wall_textures[sprite_name] = _load_texture("%s/frames/%s.png" % [TILESET_ROOT, sprite_name])
 
 func _load_texture(path: String) -> Texture2D:
@@ -89,6 +139,295 @@ func _load_texture(path: String) -> Texture2D:
 		return null
 	return ImageTexture.create_from_image(image)
 
+func _ensure_tilemap_layers() -> void:
+	if floor_tile_layer == null or not is_instance_valid(floor_tile_layer):
+		floor_tile_layer = get_node_or_null("FloorTileLayer") as TileMapLayer
+		if floor_tile_layer == null:
+			floor_tile_layer = TileMapLayer.new()
+			floor_tile_layer.name = "FloorTileLayer"
+			add_child(floor_tile_layer)
+	if wall_backing_layer == null or not is_instance_valid(wall_backing_layer):
+		wall_backing_layer = get_node_or_null("WallBackingLayer") as TileMapLayer
+		if wall_backing_layer == null:
+			wall_backing_layer = TileMapLayer.new()
+			wall_backing_layer.name = "WallBackingLayer"
+			add_child(wall_backing_layer)
+	if wall_tile_layer == null or not is_instance_valid(wall_tile_layer):
+		wall_tile_layer = get_node_or_null("WallTileLayer") as TileMapLayer
+		if wall_tile_layer == null:
+			wall_tile_layer = TileMapLayer.new()
+			wall_tile_layer.name = "WallTileLayer"
+			add_child(wall_tile_layer)
+	for layer in [floor_tile_layer, wall_backing_layer, wall_tile_layer]:
+		layer.scale = TILEMAP_LAYER_SCALE
+		layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		layer.visible = overlay_mode == "normal"
+	floor_tile_layer.z_index = -30
+	wall_backing_layer.z_index = -25
+	wall_tile_layer.z_index = -20
+	if floor_tile_set == null:
+		floor_tile_set = _create_floor_tile_set()
+	if wall_backing_tile_set == null:
+		wall_backing_tile_set = _create_wall_backing_tile_set()
+	if wall_tile_set == null:
+		wall_tile_set = _create_wall_terrain_tile_set()
+	floor_tile_layer.tile_set = floor_tile_set
+	wall_backing_layer.tile_set = wall_backing_tile_set
+	wall_tile_layer.tile_set = wall_tile_set
+
+func _create_floor_tile_set() -> TileSet:
+	var tile_set := TileSet.new()
+	tile_set.tile_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	if dungeon_floor_tileset == null:
+		return tile_set
+	var source := TileSetAtlasSource.new()
+	source.texture = dungeon_floor_tileset
+	source.texture_region_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	for atlas_coord in FLOOR_ATLAS_COORDS:
+		source.create_tile(atlas_coord)
+	tile_set.add_source(source, 0)
+	return tile_set
+
+func _create_wall_backing_tile_set() -> TileSet:
+	var tile_set := TileSet.new()
+	tile_set.tile_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	var texture: Texture2D = dungeon_wall_textures.get("wall_mid", null)
+	if texture == null:
+		var image := Image.create(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0.22, 0.17, 0.14, 1.0))
+		texture = ImageTexture.create_from_image(image)
+	var source := TileSetAtlasSource.new()
+	source.texture = texture
+	source.texture_region_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	source.create_tile(Vector2i.ZERO)
+	tile_set.add_source(source, 0)
+	return tile_set
+
+func _create_wall_terrain_tile_set() -> TileSet:
+	var tile_set := TileSet.new()
+	tile_set.tile_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	tile_set.add_terrain_set()
+	tile_set.set_terrain_set_mode(0, TileSet.TERRAIN_MODE_MATCH_CORNERS_AND_SIDES)
+	tile_set.add_terrain(0)
+	tile_set.set_terrain_name(0, 0, "wall")
+	if dungeon_wall_tileset == null:
+		return tile_set
+	var source := TileSetAtlasSource.new()
+	source.texture = dungeon_wall_tileset
+	source.texture_region_size = Vector2i(ATLAS_TILE_SIZE, ATLAS_TILE_SIZE)
+	for y in range(WALL_TERRAIN_MASK_ROWS.size()):
+		for x in range(WALL_TERRAIN_MASK_ROWS[y].size()):
+			var mask: String = WALL_TERRAIN_MASK_ROWS[y][x]
+			if mask == "000000000":
+				continue
+			var atlas_coord := Vector2i(x, y)
+			source.create_tile(atlas_coord)
+			var tile_data := source.get_tile_data(atlas_coord, 0)
+			tile_data.terrain_set = 0
+			tile_data.terrain = 0
+			_apply_terrain_mask(tile_data, mask)
+	tile_set.add_source(source, 0)
+	return tile_set
+
+func _apply_terrain_mask(tile_data: TileData, mask: String) -> void:
+	for bit in TERRAIN_MASK_PEERING_BITS:
+		if bit != -1:
+			tile_data.set_terrain_peering_bit(bit, -1)
+	for index in range(min(mask.length(), TERRAIN_MASK_PEERING_BITS.size())):
+		var peering_bit: int = TERRAIN_MASK_PEERING_BITS[index]
+		if peering_bit != -1 and mask[index] == "1":
+			tile_data.set_terrain_peering_bit(peering_bit, 0)
+
+func begin_tilemap_batch() -> void:
+	tilemap_batch_depth += 1
+
+func end_tilemap_batch() -> void:
+	if tilemap_batch_depth <= 0:
+		return
+	tilemap_batch_depth -= 1
+	if tilemap_batch_depth > 0:
+		return
+	if tilemap_batched_full_refresh:
+		tilemap_full_refresh_pending = true
+	else:
+		for chunk in tilemap_batched_chunks.keys():
+			_mark_tilemap_chunk_dirty(chunk)
+	tilemap_batched_full_refresh = false
+	tilemap_batched_chunks.clear()
+	tilemap_layers_dirty = true
+	queue_redraw()
+
+func _mark_tilemap_layers_dirty(center: Vector2i = Vector2i(-9999, -9999), radius: int = 2) -> void:
+	if center == Vector2i(-9999, -9999):
+		if tilemap_batch_depth > 0:
+			tilemap_batched_full_refresh = true
+		else:
+			tilemap_full_refresh_pending = true
+	else:
+		if tilemap_batch_depth > 0:
+			tilemap_batched_chunks[chunk_for_coord(center)] = true
+		else:
+			_mark_tilemap_radius_dirty(center, radius)
+	tilemap_layers_dirty = true
+	if tilemap_batch_depth <= 0:
+		queue_redraw()
+
+func _mark_tilemap_radius_dirty(center: Vector2i, radius: int) -> void:
+	for x in range(maxi(0, center.x - radius), mini(GRID_SIZE, center.x + radius + 1)):
+		for y in range(maxi(0, center.y - radius), mini(GRID_SIZE, center.y + radius + 1)):
+			tilemap_dirty_cells[Vector2i(x, y)] = true
+
+func _mark_tilemap_chunk_dirty(chunk: Vector2i, margin: int = 2) -> void:
+	var origin := chunk_origin(chunk)
+	for x in range(maxi(0, origin.x - margin), mini(GRID_SIZE, origin.x + CHUNK_SIZE + margin)):
+		for y in range(maxi(0, origin.y - margin), mini(GRID_SIZE, origin.y + CHUNK_SIZE + margin)):
+			tilemap_dirty_cells[Vector2i(x, y)] = true
+
+func _update_tilemap_visibility() -> void:
+	if floor_tile_layer != null and is_instance_valid(floor_tile_layer):
+		floor_tile_layer.visible = overlay_mode == "normal"
+	if wall_backing_layer != null and is_instance_valid(wall_backing_layer):
+		wall_backing_layer.visible = overlay_mode == "normal"
+	if wall_tile_layer != null and is_instance_valid(wall_tile_layer):
+		wall_tile_layer.visible = overlay_mode == "normal"
+
+func _refresh_tilemap_layers() -> void:
+	if tiles.is_empty():
+		return
+	_ensure_tilesets_loaded()
+	_ensure_tilemap_layers()
+	_update_tilemap_visibility()
+	if tilemap_full_refresh_pending:
+		_refresh_all_tilemap_cells()
+	else:
+		_refresh_dirty_tilemap_cells()
+	tilemap_layers_dirty = false
+
+func _refresh_all_tilemap_cells() -> void:
+	floor_tile_layer.clear()
+	wall_backing_layer.clear()
+	wall_tile_layer.clear()
+	var wall_cells: Array[Vector2i] = []
+	for x in range(GRID_SIZE):
+		for y in range(GRID_SIZE):
+			var coord := Vector2i(x, y)
+			if _is_layout_floor(coord):
+				floor_tile_layer.set_cell(coord, 0, _floor_atlas_coord(coord))
+			elif _is_wall_terrain_cell(coord):
+				wall_backing_layer.set_cell(coord, 0, Vector2i.ZERO)
+				wall_cells.append(coord)
+	if not wall_cells.is_empty():
+		wall_tile_layer.set_cells_terrain_connect(wall_cells, 0, 0, true)
+	tilemap_dirty_cells.clear()
+	tilemap_full_refresh_pending = false
+
+func _refresh_dirty_tilemap_cells() -> void:
+	if tilemap_dirty_cells.is_empty():
+		return
+	var wall_cells: Array[Vector2i] = []
+	for coord in tilemap_dirty_cells.keys():
+		floor_tile_layer.erase_cell(coord)
+		wall_backing_layer.erase_cell(coord)
+		wall_tile_layer.erase_cell(coord)
+	for coord in tilemap_dirty_cells.keys():
+		if _is_layout_floor(coord):
+			floor_tile_layer.set_cell(coord, 0, _floor_atlas_coord(coord))
+		elif _is_wall_terrain_cell(coord):
+			wall_backing_layer.set_cell(coord, 0, Vector2i.ZERO)
+			wall_cells.append(coord)
+	if not wall_cells.is_empty():
+		wall_tile_layer.set_cells_terrain_connect(wall_cells, 0, 0, true)
+	tilemap_dirty_cells.clear()
+
+func set_drag_preview_tiles(coords: Array[Vector2i]) -> void:
+	drag_preview_tiles.clear()
+	for coord in coords:
+		if is_in_bounds(coord):
+			drag_preview_tiles[coord] = true
+	queue_redraw()
+
+func clear_drag_preview_tiles() -> void:
+	if drag_preview_tiles.is_empty():
+		return
+	drag_preview_tiles.clear()
+	queue_redraw()
+
+func chunk_for_coord(coord: Vector2i) -> Vector2i:
+	return Vector2i(floori(float(coord.x) / float(CHUNK_SIZE)), floori(float(coord.y) / float(CHUNK_SIZE)))
+
+func chunk_origin(chunk: Vector2i) -> Vector2i:
+	return Vector2i(chunk.x * CHUNK_SIZE, chunk.y * CHUNK_SIZE)
+
+func chunk_center_tile(chunk: Vector2i) -> Vector2i:
+	return chunk_origin(chunk) + Vector2i(CHUNK_SIZE / 2, CHUNK_SIZE / 2)
+
+func is_chunk_coord_in_bounds(chunk: Vector2i) -> bool:
+	return chunk.x >= 0 and chunk.y >= 0 and chunk.x < CHUNKS_PER_AXIS and chunk.y < CHUNKS_PER_AXIS
+
+func is_chunk_unlocked(chunk: Vector2i) -> bool:
+	return unlocked_chunks.has(chunk)
+
+func is_in_unlocked_chunk(coord: Vector2i) -> bool:
+	return is_in_bounds(coord) and is_chunk_unlocked(chunk_for_coord(coord))
+
+func unlocked_chunk_count() -> int:
+	return unlocked_chunks.size()
+
+func can_unlock_chunk(chunk: Vector2i) -> bool:
+	if not is_chunk_coord_in_bounds(chunk) or is_chunk_unlocked(chunk):
+		return false
+	for offset in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		if is_chunk_unlocked(chunk + offset):
+			return true
+	return false
+
+func unlock_chunk(chunk: Vector2i) -> bool:
+	if not can_unlock_chunk(chunk):
+		return false
+	unlocked_chunks[chunk] = true
+	queue_redraw()
+	return true
+
+func lock_chunk(chunk: Vector2i) -> void:
+	if chunk == start_chunk:
+		return
+	unlocked_chunks.erase(chunk)
+	queue_redraw()
+
+func _reset_unlocked_chunks() -> void:
+	unlocked_chunks.clear()
+	unlocked_chunks[start_chunk] = true
+
+func _floor_atlas_coord(coord: Vector2i) -> Vector2i:
+	if FLOOR_ATLAS_COORDS.is_empty():
+		return Vector2i.ZERO
+	var hash: int = abs(coord.x * 19 + coord.y * 31)
+	var roll: int = hash % 20
+	var index: int = roll % 3
+	if roll >= 15:
+		index = 3 + (hash % 5)
+	return FLOOR_ATLAS_COORDS[index]
+
+func _is_wall_terrain_cell(coord: Vector2i) -> bool:
+	if not is_in_bounds(coord):
+		return false
+	var tile: DungeonTileData = get_tile(coord)
+	if tile.is_walkable():
+		return false
+	for offset in [
+		Vector2i.UP,
+		Vector2i.DOWN,
+		Vector2i.LEFT,
+		Vector2i.RIGHT,
+		Vector2i.UP + Vector2i.LEFT,
+		Vector2i.UP + Vector2i.RIGHT,
+		Vector2i.DOWN + Vector2i.LEFT,
+		Vector2i.DOWN + Vector2i.RIGHT,
+	]:
+		if _is_layout_floor(coord + offset):
+			return true
+	return false
+
 func ensure_preview_generated() -> void:
 	if tiles.is_empty():
 		generate_planning_map()
@@ -96,6 +435,9 @@ func ensure_preview_generated() -> void:
 func generate_planning_map() -> void:
 	tiles.clear()
 	next_den_id = 1
+	start_center = chunk_center_tile(start_chunk)
+	entrance_tile = Vector2i(chunk_origin(start_chunk).x, start_center.y)
+	_reset_unlocked_chunks()
 	for x in range(GRID_SIZE):
 		var column: Array = []
 		for y in range(GRID_SIZE):
@@ -105,7 +447,7 @@ func generate_planning_map() -> void:
 			column.append(DungeonTileScript.new(kind))
 		tiles.append(column)
 
-	entrance_tile = Vector2i(0, start_center.y + randi_range(-10, 10))
+	entrance_tile = Vector2i(chunk_origin(start_chunk).x, start_center.y + randi_range(-10, 10))
 	var entrance: DungeonTileData = get_tile(entrance_tile)
 	entrance.kind = DungeonTileScript.Kind.ENTRANCE
 	entrance.darkness = 48.0
@@ -113,11 +455,14 @@ func generate_planning_map() -> void:
 	if is_in_bounds(foyer):
 		get_tile(foyer).set_floor()
 		get_tile(foyer).darkness = 62.0
-	queue_redraw()
+	_mark_tilemap_layers_dirty()
 
 func generate_cave() -> void:
 	tiles.clear()
 	next_den_id = 1
+	start_center = chunk_center_tile(start_chunk)
+	entrance_tile = Vector2i(chunk_origin(start_chunk).x, start_center.y)
+	_reset_unlocked_chunks()
 	for x in range(GRID_SIZE):
 		var column: Array = []
 		for y in range(GRID_SIZE):
@@ -140,7 +485,7 @@ func generate_cave() -> void:
 	get_tile(entrance_tile).darkness = 54.0
 	_carve_path(entrance_tile + Vector2i.RIGHT, start_center)
 	_seed_starting_conditions()
-	queue_redraw()
+	_mark_tilemap_layers_dirty()
 
 func _carve_path(from_tile: Vector2i, to_tile: Vector2i) -> void:
 	var cursor := from_tile
@@ -192,6 +537,7 @@ func tile_to_world(coord: Vector2i) -> Vector2:
 
 func set_overlay(mode: String) -> void:
 	overlay_mode = mode
+	_update_tilemap_visibility()
 	queue_redraw()
 
 func dig(coord: Vector2i) -> bool:
@@ -204,7 +550,7 @@ func dig(coord: Vector2i) -> bool:
 	for neighbor in get_cardinal_neighbors(coord):
 		if is_in_bounds(neighbor) and get_tile(neighbor).kind == DungeonTileScript.Kind.WALL:
 			get_tile(neighbor).darkness = 95.0
-	queue_redraw()
+	_mark_tilemap_layers_dirty(coord)
 	return true
 
 func fill(coord: Vector2i) -> bool:
@@ -217,7 +563,7 @@ func fill(coord: Vector2i) -> bool:
 		clear_structure(coord)
 		return true
 	tile.set_stone()
-	queue_redraw()
+	_mark_tilemap_layers_dirty(coord)
 	return true
 
 func place_structure(coord: Vector2i, structure_name: String) -> bool:
@@ -240,6 +586,8 @@ func can_place_monster_den(anchor: Vector2i) -> bool:
 	for offset in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.RIGHT + Vector2i.DOWN]:
 		var coord: Vector2i = anchor + offset
 		if not is_in_bounds(coord):
+			return false
+		if not is_in_unlocked_chunk(coord):
 			return false
 		var tile: DungeonTileData = get_tile(coord)
 		if not tile.is_walkable() or tile.kind == DungeonTileScript.Kind.ENTRANCE:
@@ -381,7 +729,12 @@ func get_build_warnings() -> Array[String]:
 	return warnings
 
 func shortest_path_length(from_coord: Vector2i, to_coord: Vector2i) -> int:
+	return shortest_path_length_avoiding(from_coord, to_coord, {})
+
+func shortest_path_length_avoiding(from_coord: Vector2i, to_coord: Vector2i, blocked_coords: Dictionary) -> int:
 	if not is_in_bounds(from_coord) or not is_in_bounds(to_coord):
+		return -1
+	if blocked_coords.has(from_coord) or blocked_coords.has(to_coord):
 		return -1
 	if not get_tile(from_coord).is_walkable() or not get_tile(to_coord).is_walkable():
 		return -1
@@ -394,9 +747,10 @@ func shortest_path_length(from_coord: Vector2i, to_coord: Vector2i) -> int:
 		if current == to_coord:
 			return int(distances[current])
 		for neighbor in walkable_neighbors(current):
-			if not distances.has(neighbor):
-				distances[neighbor] = int(distances[current]) + 1
-				frontier.append(neighbor)
+			if blocked_coords.has(neighbor) or distances.has(neighbor):
+				continue
+			distances[neighbor] = int(distances[current]) + 1
+			frontier.append(neighbor)
 	return -1
 
 func find_path(from_coord: Vector2i, to_coord: Vector2i) -> Array[Vector2i]:
@@ -452,6 +806,8 @@ func get_best_neighbor(coord: Vector2i, score_callable: Callable) -> Vector2i:
 	return best
 
 func _process(delta: float) -> void:
+	if tilemap_layers_dirty:
+		_refresh_tilemap_layers()
 	shimmer_time += delta
 	var current_hover: Vector2i = world_to_tile(get_global_mouse_position())
 	if current_hover != hovered_tile:
@@ -465,18 +821,64 @@ func _draw() -> void:
 	if tiles.is_empty():
 		return
 	_ensure_tilesets_loaded()
-	for x in range(GRID_SIZE):
-		for y in range(GRID_SIZE):
-			var coord := Vector2i(x, y)
-			var rect := Rect2(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-			draw_rect(rect, _tile_color(coord), true)
-			_draw_tile_texture(coord, rect)
-			if get_tile(coord).is_walkable():
-				var grid_alpha := 0.22 if overlay_mode == "normal" else 0.10
-				draw_rect(rect, Color(0.78, 0.70, 0.55, grid_alpha), false, 1.0)
-			_draw_tile_effects(coord, rect)
+	if tilemap_layers_dirty:
+		_refresh_tilemap_layers()
+	var drawn_tiles: Dictionary = {}
+	for draw_bounds in _manual_draw_tile_rects():
+		for x in range(draw_bounds.position.x, draw_bounds.end.x):
+			for y in range(draw_bounds.position.y, draw_bounds.end.y):
+				var coord := Vector2i(x, y)
+				if drawn_tiles.has(coord):
+					continue
+				drawn_tiles[coord] = true
+				var rect := Rect2(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+				var tilemap_base := _tilemap_covers_base(coord)
+				if not tilemap_base:
+					draw_rect(rect, _tile_color(coord), true)
+				if not tilemap_base:
+					_draw_tile_texture(coord, rect)
+				if get_tile(coord).is_walkable():
+					var grid_alpha := 0.22 if overlay_mode == "normal" else 0.10
+					draw_rect(rect, Color(0.78, 0.70, 0.55, grid_alpha), false, 1.0)
+				_draw_tile_effects(coord, rect)
+	_draw_chunk_influence_overlays()
+	_draw_drag_preview_tiles()
 	if is_in_bounds(hovered_tile):
 		draw_rect(Rect2(hovered_tile.x * TILE_SIZE, hovered_tile.y * TILE_SIZE, TILE_SIZE, TILE_SIZE), Color(0.8, 0.95, 0.75, 0.45), false, 2.0)
+
+func _manual_draw_tile_rects() -> Array[Rect2i]:
+	var rects: Array[Rect2i] = []
+	for chunk in unlocked_chunks.keys():
+		var origin := chunk_origin(chunk)
+		var start := Vector2i(maxi(0, origin.x - 2), maxi(0, origin.y - 2))
+		var end := Vector2i(mini(GRID_SIZE, origin.x + CHUNK_SIZE + 2), mini(GRID_SIZE, origin.y + CHUNK_SIZE + 2))
+		rects.append(Rect2i(start, end - start))
+	return rects
+
+func _draw_chunk_influence_overlays() -> void:
+	var chunk_pixels := CHUNK_SIZE * TILE_SIZE
+	for chunk_x in range(CHUNKS_PER_AXIS):
+		for chunk_y in range(CHUNKS_PER_AXIS):
+			var chunk := Vector2i(chunk_x, chunk_y)
+			var rect := Rect2(chunk_x * chunk_pixels, chunk_y * chunk_pixels, chunk_pixels, chunk_pixels)
+			if not is_chunk_unlocked(chunk):
+				draw_rect(rect, Color(0.0, 0.0, 0.0, 0.24), true)
+				draw_rect(rect, Color(0.28, 0.20, 0.13, 0.45), false, 2.0)
+			else:
+				draw_rect(rect, Color(0.52, 0.84, 0.55, 0.42), false, 2.0)
+
+func _draw_drag_preview_tiles() -> void:
+	for coord in drag_preview_tiles.keys():
+		if is_in_bounds(coord):
+			var rect := Rect2(coord.x * TILE_SIZE, coord.y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+			draw_rect(rect, Color(0.72, 0.92, 0.72, 0.22), true)
+			draw_rect(rect, Color(0.88, 1.0, 0.74, 0.82), false, 2.0)
+
+func _tilemap_covers_base(coord: Vector2i) -> bool:
+	if overlay_mode != "normal":
+		return false
+	var tile: DungeonTileData = get_tile(coord)
+	return tile.is_walkable() or _is_wall_terrain_cell(coord)
 
 func _tile_color(coord: Vector2i) -> Color:
 	var tile: DungeonTileData = get_tile(coord)
@@ -522,12 +924,14 @@ func _draw_tile_texture(coord: Vector2i, rect: Rect2) -> void:
 		var solid_wall_texture := _wall_texture(coord)
 		if solid_wall_texture != null:
 			draw_texture_rect(solid_wall_texture, rect, false, _wall_tint(coord, true))
+			_draw_wall_overlays(coord, rect, true)
 		elif dungeon_wall_tileset != null:
 			draw_texture_rect_region(dungeon_wall_tileset, rect, OUTER_WALL_REGION, Color(0.82, 0.78, 0.72, 0.95))
 	elif tile.kind == DungeonTileScript.Kind.STONE:
 		var stone_texture := _wall_texture(coord)
 		if stone_texture != null:
 			draw_texture_rect(stone_texture, rect, false, _wall_tint(coord, false))
+			_draw_wall_overlays(coord, rect, false)
 	elif tile.is_walkable():
 		var floor_texture := _floor_texture(coord)
 		if floor_texture != null:
@@ -557,6 +961,25 @@ func _wall_texture(coord: Vector2i) -> Texture2D:
 		return null
 	return dungeon_wall_textures[sprite_name]
 
+func _draw_wall_overlays(coord: Vector2i, rect: Rect2, solid_border: bool) -> void:
+	for sprite_name in _wall_overlay_sprite_names_for_coord(coord):
+		if dungeon_wall_textures.has(sprite_name) and dungeon_wall_textures[sprite_name] != null:
+			draw_texture_rect(dungeon_wall_textures[sprite_name], rect, false, _wall_tint(coord, solid_border))
+
+func _wall_overlay_sprite_names_for_coord(coord: Vector2i) -> Array[String]:
+	if not is_in_bounds(coord):
+		return []
+	var tile: DungeonTileData = get_tile(coord)
+	if tile.is_walkable():
+		return []
+	var overlays: Array[String] = []
+	var open_above := _is_layout_floor(coord + Vector2i.UP)
+	if open_above:
+		var floor_above_left := _is_layout_floor(coord + Vector2i.UP + Vector2i.LEFT)
+		var floor_above_right := _is_layout_floor(coord + Vector2i.UP + Vector2i.RIGHT)
+		overlays.append(_horizontal_wall_sprite(floor_above_left, floor_above_right, "wall_top_left", "wall_top_mid", "wall_top_right"))
+	return overlays
+
 func _wall_sprite_name_for_coord(coord: Vector2i) -> String:
 	if not is_in_bounds(coord):
 		return ""
@@ -575,38 +998,44 @@ func _wall_sprite_name_for_coord(coord: Vector2i) -> String:
 	var floor_two_below_left := _is_layout_floor(coord + Vector2i.DOWN * 2 + Vector2i.LEFT)
 	var floor_two_below_right := _is_layout_floor(coord + Vector2i.DOWN * 2 + Vector2i.RIGHT)
 	if floor_two_below and not open_below:
-		if not floor_two_below_left and floor_two_below_right:
-			return "wall_top_left"
-		if floor_two_below_left and not floor_two_below_right:
-			return "wall_top_right"
-		return "wall_top_mid"
+		return _horizontal_wall_sprite(floor_two_below_left, floor_two_below_right, "wall_top_left", "wall_top_mid", "wall_top_right")
+	if floor_above_right and not floor_above_left and not open_above and not open_below and not open_left and not open_right:
+		return "wall_edge_bottom_left"
+	if floor_above_left and not floor_above_right and not open_above and not open_below and not open_left and not open_right:
+		return "wall_edge_bottom_right"
+	if floor_below_right and not floor_below_left and not open_above and not open_below and not open_left and not open_right:
+		return "wall_edge_mid_right"
 	if floor_below_left and not floor_below_right and not open_above and not open_below and not open_left and not open_right:
 		return "wall_edge_mid_left"
 	if not open_above and not open_below and not open_left and not open_right:
 		return ""
 	if open_below:
-		if not floor_below_left and floor_below_right:
-			return "wall_left"
-		if floor_below_left and not floor_below_right:
-			return "wall_right"
-		return "wall_mid"
+		return _horizontal_wall_sprite(floor_below_left, floor_below_right, "wall_left", "wall_mid", "wall_right")
 	if open_above:
-		if not floor_above_left and floor_above_right:
-			return "wall_left"
-		if floor_above_left and not floor_above_right:
-			return "wall_right"
-		return "wall_mid"
+		return _horizontal_wall_sprite(floor_above_left, floor_above_right, "wall_left", "wall_mid", "wall_right")
 	if open_right:
 		var floor_right_up := _is_layout_floor(coord + Vector2i.RIGHT + Vector2i.UP)
 		var floor_right_down := _is_layout_floor(coord + Vector2i.RIGHT + Vector2i.DOWN)
-		if not floor_right_up and floor_right_down:
-			return "wall_edge_top_left"
-		if floor_right_up and not floor_right_down:
-			return "wall_edge_bottom_left"
-		return "wall_edge_left"
+		return _vertical_wall_sprite(floor_right_up, floor_right_down, "wall_outer_top_left", "wall_outer_mid_left", "wall_outer_front_left")
 	if open_left:
-		return "wall_outer_mid_right"
+		var floor_left_up := _is_layout_floor(coord + Vector2i.LEFT + Vector2i.UP)
+		var floor_left_down := _is_layout_floor(coord + Vector2i.LEFT + Vector2i.DOWN)
+		return _vertical_wall_sprite(floor_left_up, floor_left_down, "wall_outer_top_right", "wall_outer_mid_right", "wall_outer_front_right")
 	return "wall_mid"
+
+func _horizontal_wall_sprite(floor_left: bool, floor_right: bool, left_sprite: String, mid_sprite: String, right_sprite: String) -> String:
+	if not floor_left and floor_right:
+		return left_sprite
+	if floor_left and not floor_right:
+		return right_sprite
+	return mid_sprite
+
+func _vertical_wall_sprite(floor_up: bool, floor_down: bool, top_sprite: String, mid_sprite: String, bottom_sprite: String) -> String:
+	if not floor_up and floor_down:
+		return top_sprite
+	if floor_up and not floor_down:
+		return bottom_sprite
+	return mid_sprite
 
 func _is_layout_floor(coord: Vector2i) -> bool:
 	if not is_in_bounds(coord):

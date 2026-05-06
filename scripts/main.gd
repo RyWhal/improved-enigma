@@ -7,6 +7,8 @@ const MAX_ACTIVE_CRAWLERS := 32
 const BOSS_RESPAWN_DELAY_TICKS := 215
 const BOSS_RESPAWN_BIOMASS_COST := 120
 const BOSS_RESPAWN_ESSENCE_COST := 60
+const BASE_EXPAND_INFLUENCE_COST := 70
+const EXPAND_INFLUENCE_COST_STEP := 30
 
 @onready var grid: DungeonGrid = $Grid
 @onready var simulation: DungeonSimulation = $Simulation
@@ -23,11 +25,17 @@ var dungeon_inert: bool = false
 var heart_coord: Vector2i = Vector2i(-1, -1)
 var is_dragging_tool: bool = false
 var last_drag_coord: Vector2i = Vector2i(-1, -1)
+var drag_preview_active: bool = false
+var drag_preview_tool: String = ""
+var drag_preview_last_coord: Vector2i = Vector2i(-1, -1)
+var drag_preview_tiles: Dictionary = {}
 var sim_accumulator: float = 0.0
 var incursion_timer: float = 22.0
+var night_paused: bool = false
 var natural_spawn_timer: float = 6.0
 var boss_respawn_ticks: int = 0
 var camera_speed: float = 680.0
+var action_failure_message: String = ""
 var tool_costs: Dictionary = {
 	"dig": 1,
 	"fill": 1,
@@ -44,6 +52,7 @@ var tool_costs: Dictionary = {
 	"seed_carrion_mite": 4,
 	"respawn_boss": 0,
 	"explode_spores": 0,
+	"expand_influence": 0,
 }
 
 func _ready() -> void:
@@ -57,8 +66,10 @@ func _ready() -> void:
 	ui.undo_requested.connect(_undo_planning_action)
 	ui.start_requested.connect(_start_dungeon)
 	ui.restart_requested.connect(_restart_run)
-	camera.position = grid.tile_to_world(grid.entrance_tile + Vector2i(14, 0))
+	ui.night_pause_toggled.connect(_set_night_paused)
+	camera.position = grid.tile_to_world(grid.start_center)
 	ui.set_phase("Planning Phase")
+	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 	_update_build_warnings()
 	ui.show_message("Plan your first dungeon. Dig from the entrance, place the Heart, then start the run.")
 	_log_event("New dungeon run started.")
@@ -66,6 +77,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_handle_camera(delta)
 	if planning_phase or dungeon_inert:
+		ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 		return
 	sim_accumulator += delta
 	if sim_accumulator >= 0.28:
@@ -76,10 +88,12 @@ func _process(delta: float) -> void:
 		_update_boss_respawn_timer()
 		_try_den_spawns()
 		_try_natural_spawn()
-	incursion_timer -= delta
-	if incursion_timer <= 0.0:
-		_spawn_incursion()
-		incursion_timer = randf_range(28.0, 45.0)
+	if not night_paused:
+		incursion_timer -= delta
+		if incursion_timer <= 0.0:
+			_spawn_incursion()
+			incursion_timer = randf_range(28.0, 45.0)
+	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -90,20 +104,22 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 			if ui.is_world_input_blocked():
 				return
-			is_dragging_tool = selected_tool in ["dig", "fill"]
 			var coord := grid.world_to_tile(get_global_mouse_position())
-			last_drag_coord = coord
-			_handle_click(coord)
+			if selected_tool in ["dig", "fill"]:
+				_begin_drag_preview(coord)
+			else:
+				_handle_click(coord)
 		elif event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+			if drag_preview_active:
+				_commit_drag_preview()
 			is_dragging_tool = false
 			last_drag_coord = Vector2i(-1, -1)
-	elif event is InputEventMouseMotion and is_dragging_tool:
+	elif event is InputEventMouseMotion and drag_preview_active:
 		if ui.is_world_input_blocked():
 			return
 		var drag_coord := grid.world_to_tile(get_global_mouse_position())
-		if drag_coord != last_drag_coord:
-			last_drag_coord = drag_coord
-			_handle_click(drag_coord)
+		if drag_coord != drag_preview_last_coord:
+			_extend_drag_preview(drag_coord)
 
 func _handle_camera(delta: float) -> void:
 	var direction := Vector2.ZERO
@@ -134,8 +150,13 @@ func _handle_click(coord: Vector2i) -> void:
 			return
 		ui.show_tile_info(coord, grid.get_tile(coord), _mutation_conditions_near(coord))
 		return
-	if planning_phase and not selected_tool in ["dig", "fill", "place_heart", "place_treasure", "place_trap", "place_door", "place_monster_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root"]:
+	if selected_tool == "expand_influence":
+		_expand_influence_at(coord)
+		return
+	if planning_phase and not selected_tool in ["dig", "fill", "place_heart", "place_treasure", "place_trap", "place_door", "place_monster_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root", "expand_influence"]:
 		ui.show_message("Natural shaping unlocks after the dungeon starts. Use build tools during planning.")
+		return
+	if not _has_influence_for_tool(coord):
 		return
 	match selected_tool:
 		"dig":
@@ -144,7 +165,7 @@ func _handle_click(coord: Vector2i) -> void:
 			if planning_phase:
 				_erase_planning_tile(coord)
 			else:
-				_apply_tile_action(coord, selected_tool, func() -> bool: return grid.fill(coord))
+				_apply_tile_action(coord, selected_tool, func() -> bool: return _fill_preserving_heart_access(coord))
 		"place_heart":
 			_apply_tile_action(coord, selected_tool, func() -> bool: return _place_unique_structure(coord, "heart"))
 		"move_heart":
@@ -188,16 +209,157 @@ func _handle_click(coord: Vector2i) -> void:
 			_explode_spores(coord)
 	grid.queue_redraw()
 
+func _begin_drag_preview(coord: Vector2i) -> void:
+	if not selected_tool in ["dig", "fill"]:
+		_handle_click(coord)
+		return
+	drag_preview_active = true
+	is_dragging_tool = true
+	drag_preview_tool = selected_tool
+	drag_preview_last_coord = coord
+	last_drag_coord = coord
+	drag_preview_tiles.clear()
+	_add_drag_preview_line(coord, coord)
+	_sync_drag_preview_to_grid()
+
+func _extend_drag_preview(coord: Vector2i) -> void:
+	if not drag_preview_active:
+		return
+	_add_drag_preview_line(drag_preview_last_coord, coord)
+	drag_preview_last_coord = coord
+	last_drag_coord = coord
+	_sync_drag_preview_to_grid()
+
+func _commit_drag_preview() -> void:
+	if not drag_preview_active:
+		return
+	var committed_tool := drag_preview_tool
+	var coords: Array[Vector2i] = []
+	for coord in drag_preview_tiles.keys():
+		coords.append(coord)
+	drag_preview_active = false
+	is_dragging_tool = false
+	drag_preview_tool = ""
+	drag_preview_last_coord = Vector2i(-1, -1)
+	last_drag_coord = Vector2i(-1, -1)
+	drag_preview_tiles.clear()
+	grid.clear_drag_preview_tiles()
+	match committed_tool:
+		"dig":
+			_commit_drag_dig(coords)
+		"fill":
+			_commit_drag_fill(coords)
+
+func _add_drag_preview_line(from_coord: Vector2i, to_coord: Vector2i) -> void:
+	var delta := to_coord - from_coord
+	var steps: int = maxi(absi(delta.x), absi(delta.y))
+	if steps == 0:
+		if _can_preview_drag_tile(to_coord, drag_preview_tool):
+			drag_preview_tiles[to_coord] = true
+		return
+	for index in range(steps + 1):
+		var t := float(index) / float(steps)
+		var coord := Vector2i(roundi(lerpf(from_coord.x, to_coord.x, t)), roundi(lerpf(from_coord.y, to_coord.y, t)))
+		if _can_preview_drag_tile(coord, drag_preview_tool):
+			drag_preview_tiles[coord] = true
+
+func _can_preview_drag_tile(coord: Vector2i, tool: String) -> bool:
+	if not grid.is_in_bounds(coord) or not grid.is_in_unlocked_chunk(coord):
+		return false
+	var tile: DungeonTileData = grid.get_tile(coord)
+	match tool:
+		"dig":
+			return tile.is_diggable()
+		"fill":
+			if planning_phase:
+				return tile.kind != DungeonTileScript.Kind.ENTRANCE and (tile.kind == DungeonTileScript.Kind.FLOOR or tile.structure != "" or tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed)
+			return tile.kind == DungeonTileScript.Kind.FLOOR
+	return false
+
+func _sync_drag_preview_to_grid() -> void:
+	var coords: Array[Vector2i] = []
+	for coord in drag_preview_tiles.keys():
+		coords.append(coord)
+	grid.set_drag_preview_tiles(coords)
+
+func _commit_drag_dig(coords: Array[Vector2i]) -> void:
+	var valid: Array[Vector2i] = []
+	for coord in coords:
+		if _can_preview_drag_tile(coord, "dig"):
+			valid.append(coord)
+	if valid.is_empty():
+		ui.show_message("No diggable tiles selected.")
+		return
+	var cost: int = int(tool_costs["dig"])
+	var total_cost := cost * valid.size()
+	if total_cost > 0 and not resources.spend("essence", total_cost):
+		ui.show_message("Need %s essence." % total_cost)
+		return
+	var changed := 0
+	grid.begin_tilemap_batch()
+	for coord in valid:
+		var before: Dictionary = grid.get_tile(coord).snapshot()
+		if grid.dig(coord):
+			changed += 1
+			if planning_phase:
+				grid.get_tile(coord).planning_floor_cost += cost
+				planning_history.append({"coord": coord, "before": before, "cost": cost})
+		elif cost > 0:
+			resources.add("essence", cost)
+	grid.end_tilemap_batch()
+	if changed > 0:
+		if planning_phase:
+			_update_build_warnings()
+		heart_coord = grid.find_structure("heart")
+		ui.show_message("Dug %s tiles." % changed)
+
+func _commit_drag_fill(coords: Array[Vector2i]) -> void:
+	var valid: Array[Vector2i] = []
+	for coord in coords:
+		if _can_preview_drag_tile(coord, "fill"):
+			valid.append(coord)
+	if valid.is_empty():
+		ui.show_message("No fillable tiles selected.")
+		return
+	if not _heart_path_survives_fill_batch(valid, planning_phase):
+		ui.show_message("The Heart must remain reachable from the entrance.")
+		return
+	var changed := 0
+	grid.begin_tilemap_batch()
+	if planning_phase:
+		for coord in valid:
+			if _erase_planning_tile(coord, false, false):
+				changed += 1
+	else:
+		var cost: int = int(tool_costs["fill"])
+		var total_cost := cost * valid.size()
+		if total_cost > 0 and not resources.spend("essence", total_cost):
+			grid.end_tilemap_batch()
+			ui.show_message("Need %s essence." % total_cost)
+			return
+		for coord in valid:
+			if _fill_preserving_heart_access(coord):
+				changed += 1
+			elif cost > 0:
+				resources.add("essence", cost)
+	grid.end_tilemap_batch()
+	if changed > 0:
+		if planning_phase:
+			_update_build_warnings()
+		heart_coord = grid.find_structure("heart")
+		ui.show_message("Filled %s tiles." % changed)
+
 func _apply_tile_action(coord: Vector2i, tool: String, action: Callable) -> void:
 	var cost: int = int(tool_costs.get(tool, 0))
 	var before: Dictionary = grid.get_tile(coord).snapshot() if grid.is_in_bounds(coord) else {}
 	if cost > 0 and not resources.spend("essence", cost):
 		ui.show_message("Need %s essence." % cost)
 		return
+	action_failure_message = ""
 	if not action.call():
 		if cost > 0:
 			resources.add("essence", cost)
-		ui.show_message("That action cannot be used there.")
+		ui.show_message(action_failure_message if action_failure_message != "" else "That action cannot be used there.")
 		return
 	if planning_phase:
 		var tile: DungeonTileData = grid.get_tile(coord)
@@ -208,6 +370,66 @@ func _apply_tile_action(coord: Vector2i, tool: String, action: Callable) -> void
 		planning_history.append({"coord": coord, "before": before, "cost": cost})
 		_update_build_warnings()
 	heart_coord = grid.find_structure("heart")
+
+func _fail_action(message: String) -> bool:
+	action_failure_message = message
+	return false
+
+func _heart_is_reachable() -> bool:
+	var heart := grid.find_structure("heart")
+	if heart == Vector2i(-1, -1):
+		return false
+	return grid.shortest_path_length(grid.entrance_tile, heart) >= 0
+
+func _heart_path_survives_blocked_tiles(blocked_tiles: Array) -> bool:
+	var heart := grid.find_structure("heart")
+	if heart == Vector2i(-1, -1):
+		return true
+	var blocked: Dictionary = {}
+	for raw_coord in blocked_tiles:
+		var coord: Vector2i = raw_coord
+		if not grid.is_in_bounds(coord):
+			continue
+		if coord == heart:
+			return false
+		blocked[coord] = true
+	return grid.shortest_path_length_avoiding(grid.entrance_tile, heart, blocked) >= 0
+
+func _heart_path_survives_fill_batch(coords: Array[Vector2i], is_planning: bool) -> bool:
+	var heart := grid.find_structure("heart")
+	if heart == Vector2i(-1, -1):
+		return true
+	var blocked: Dictionary = {}
+	for coord in coords:
+		if not grid.is_in_bounds(coord):
+			continue
+		var tile: DungeonTileData = grid.get_tile(coord)
+		if is_planning and tile.structure == "heart":
+			return true
+		if not is_planning and tile.structure == "heart":
+			return false
+		var clears_floor := tile.kind == DungeonTileScript.Kind.FLOOR and tile.structure == ""
+		if is_planning and (tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed):
+			clears_floor = false
+		if clears_floor:
+			blocked[coord] = true
+	if blocked.is_empty():
+		return true
+	return grid.shortest_path_length_avoiding(grid.entrance_tile, heart, blocked) >= 0
+
+func _fill_preserving_heart_access(coord: Vector2i) -> bool:
+	if not grid.is_in_bounds(coord):
+		return false
+	var tile: DungeonTileData = grid.get_tile(coord)
+	if tile.kind != DungeonTileScript.Kind.FLOOR:
+		return false
+	if tile.structure == "heart":
+		return _fail_action("The Heart cannot be filled in.")
+	if tile.structure != "":
+		return grid.fill(coord)
+	if not _heart_path_survives_blocked_tiles([coord]):
+		return _fail_action("The Heart must remain reachable from the entrance.")
+	return grid.fill(coord)
 
 func _apply_source_action(coord: Vector2i, tool: String, mutation: Callable) -> void:
 	if not grid.is_in_bounds(coord):
@@ -223,22 +445,29 @@ func _apply_source_action(coord: Vector2i, tool: String, mutation: Callable) -> 
 		planning_history.append({"coord": coord, "before": before, "cost": cost})
 		_update_build_warnings()
 
-func _erase_planning_tile(coord: Vector2i) -> void:
+func _erase_planning_tile(coord: Vector2i, announce: bool = true, refresh_warnings: bool = true) -> bool:
 	if not grid.is_in_bounds(coord):
-		return
+		return false
+	if not grid.is_in_unlocked_chunk(coord):
+		if announce:
+			ui.show_message("Expand influence into that chunk before shaping it.")
+		return false
 	var tile: DungeonTileData = grid.get_tile(coord)
 	if tile.kind == DungeonTileScript.Kind.ENTRANCE:
-		ui.show_message("The entrance cannot be erased.")
-		return
+		if announce:
+			ui.show_message("The entrance cannot be erased.")
+		return false
 	if tile.structure == "monster_den":
 		var den_refund := 0
 		for den_tile_coord in grid.den_tiles(tile.den_id):
 			den_refund += grid.get_tile(den_tile_coord).planning_structure_cost
 		grid.clear_monster_den(tile.den_id)
 		resources.add("essence", den_refund)
-		_update_build_warnings()
-		ui.show_message("Monster den erased. Refunded %s essence." % den_refund)
-		return
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Monster den erased. Refunded %s essence." % den_refund)
+		return true
 	if tile.structure != "":
 		var refund: int = tile.planning_structure_cost
 		tile.structure = ""
@@ -248,10 +477,12 @@ func _erase_planning_tile(coord: Vector2i) -> void:
 		tile.planning_structure_cost = 0
 		resources.add("essence", refund)
 		heart_coord = grid.find_structure("heart")
-		_update_build_warnings()
-		ui.show_message("Structure erased. Refunded %s essence." % refund)
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Structure erased. Refunded %s essence." % refund)
 		grid.queue_redraw()
-		return
+		return true
 	if tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed:
 		var source_refund: int = tile.planning_structure_cost
 		tile.heat_source = false
@@ -260,23 +491,35 @@ func _erase_planning_tile(coord: Vector2i) -> void:
 		tile.spore_seed = false
 		tile.planning_structure_cost = 0
 		resources.add("essence", source_refund)
-		_update_build_warnings()
-		ui.show_message("Source erased. Refunded %s essence." % source_refund)
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Source erased. Refunded %s essence." % source_refund)
 		grid.queue_redraw()
-		return
+		return true
 	if tile.kind == DungeonTileScript.Kind.FLOOR:
+		if not _heart_path_survives_blocked_tiles([coord]):
+			if announce:
+				ui.show_message("The Heart must remain reachable from the entrance.")
+			return false
 		var floor_refund: int = tile.planning_floor_cost
 		tile.set_stone()
 		resources.add("essence", floor_refund)
-		_update_build_warnings()
-		ui.show_message("Floor erased. Refunded %s essence." % floor_refund)
-		grid.queue_redraw()
-		return
-	ui.show_message("Nothing planned there to erase.")
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Floor erased. Refunded %s essence." % floor_refund)
+		grid.call("_mark_tilemap_layers_dirty", coord)
+		return true
+	if announce:
+		ui.show_message("Nothing planned there to erase.")
+	return false
 
 func _place_unique_structure(coord: Vector2i, structure_name: String) -> bool:
 	if grid.find_structure(structure_name) != Vector2i(-1, -1):
 		return false
+	if structure_name == "heart" and grid.shortest_path_length(grid.entrance_tile, coord) < 0:
+		return _fail_action("The Heart needs an open path from the entrance.")
 	return grid.place_structure(coord, structure_name)
 
 func _move_heart(coord: Vector2i) -> bool:
@@ -288,6 +531,8 @@ func _move_heart(coord: Vector2i) -> bool:
 		return false
 	if not grid.get_tile(coord).is_walkable() or grid.get_tile(coord).structure != "":
 		return false
+	if grid.shortest_path_length(grid.entrance_tile, coord) < 0:
+		return _fail_action("The Heart needs an open path from the entrance.")
 	var old_hp: int = max(grid.get_tile(old_heart).heart_hp, 1)
 	grid.clear_structure(old_heart)
 	grid.place_structure(coord, "heart")
@@ -301,6 +546,12 @@ func _undo_planning_action() -> void:
 		ui.show_message("Nothing to undo in planning.")
 		return
 	var entry: Dictionary = planning_history.pop_back()
+	if entry.get("type", "") == "unlock_chunk":
+		grid.lock_chunk(entry["chunk"])
+		resources.add("essence", int(entry["cost"]))
+		_update_build_warnings()
+		ui.show_message("Influence expansion undone.")
+		return
 	var coord: Vector2i = entry["coord"]
 	grid.get_tile(coord).restore(entry["before"])
 	resources.add("essence", int(entry["cost"]))
@@ -313,6 +564,9 @@ func _start_dungeon() -> void:
 	if heart_coord == Vector2i(-1, -1):
 		ui.show_message("The dungeon needs a Heart before it can awaken.")
 		return
+	if not _heart_is_reachable():
+		ui.show_message("The Heart needs an open path from the entrance before the dungeon can awaken.")
+		return
 	planning_phase = false
 	planning_history.clear()
 	ui.set_phase("Live Dungeon")
@@ -320,6 +574,8 @@ func _start_dungeon() -> void:
 	_seed_initial_ecosystem()
 	_spawn_boss_larva()
 	incursion_timer = 7.0
+	night_paused = false
+	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 	ui.show_message("The dungeon wakes. Protect the Heart; it will not heal on its own.")
 	_log_event("The dungeon wakes.")
 
@@ -338,20 +594,67 @@ func _restart_run() -> void:
 	heart_coord = Vector2i(-1, -1)
 	is_dragging_tool = false
 	last_drag_coord = Vector2i(-1, -1)
+	drag_preview_active = false
+	drag_preview_tool = ""
+	drag_preview_last_coord = Vector2i(-1, -1)
+	drag_preview_tiles.clear()
 	sim_accumulator = 0.0
 	incursion_timer = 22.0
+	night_paused = false
 	natural_spawn_timer = 6.0
 	boss_respawn_ticks = 0
 	resources.reset()
 	grid.generate_planning_map()
-	camera.position = grid.tile_to_world(grid.entrance_tile + Vector2i(14, 0))
+	camera.position = grid.tile_to_world(grid.start_center)
 	ui.set_phase("Planning Phase")
+	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 	_update_build_warnings()
 	ui.show_message("Plan your next dungeon. Place the Heart, then start the run.")
 	_log_event("Run restarted.")
 
 func _update_build_warnings() -> void:
 	ui.set_warnings(grid.get_build_warnings())
+
+func _has_influence_for_tool(coord: Vector2i) -> bool:
+	if grid.is_in_unlocked_chunk(coord):
+		return true
+	ui.show_message("Expand influence into that 32x32 chunk before shaping it.")
+	return false
+
+func _expand_influence_at(coord: Vector2i) -> bool:
+	if not grid.is_in_bounds(coord):
+		return false
+	var chunk: Vector2i = grid.chunk_for_coord(coord)
+	if grid.is_chunk_unlocked(chunk):
+		ui.show_message("That chunk is already under dungeon influence.")
+		return false
+	if not grid.can_unlock_chunk(chunk):
+		ui.show_message("Influence can only expand into an adjacent 32x32 chunk.")
+		return false
+	var cost := _expand_influence_cost()
+	if not resources.spend("essence", cost):
+		ui.show_message("Need %s essence to expand influence." % cost)
+		return false
+	if not grid.unlock_chunk(chunk):
+		resources.add("essence", cost)
+		ui.show_message("Influence cannot expand there.")
+		return false
+	if planning_phase:
+		planning_history.append({"type": "unlock_chunk", "chunk": chunk, "cost": cost})
+	_update_build_warnings()
+	ui.show_message("Influence spreads into chunk %s,%s." % [chunk.x, chunk.y])
+	_log_event("The dungeon expands influence into chunk %s,%s." % [chunk.x, chunk.y])
+	return true
+
+func _expand_influence_cost() -> int:
+	return BASE_EXPAND_INFLUENCE_COST + maxi(grid.unlocked_chunk_count() - 1, 0) * EXPAND_INFLUENCE_COST_STEP
+
+func _set_night_paused(paused: bool) -> void:
+	if planning_phase or dungeon_inert:
+		night_paused = false
+	else:
+		night_paused = paused
+	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
 
 func _spend_and_require_floor(coord: Vector2i, resource_name: String, cost: int) -> bool:
 	if not grid.get_tile(coord).is_walkable():

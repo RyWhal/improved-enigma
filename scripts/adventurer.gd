@@ -5,6 +5,7 @@ signal log_event(message: String)
 
 const TILE_SIZE := DungeonGrid.TILE_SIZE
 const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
+const VISUAL_MOVE_SECONDS := 0.34
 
 var role: String = "looter"
 var tile_pos: Vector2i = Vector2i.ZERO
@@ -20,6 +21,9 @@ var previous_tile_pos: Vector2i = Vector2i(-1, -1)
 var committed_door_target: Vector2i = Vector2i(-1, -1)
 var dwarf_run_frames: Array[Texture2D] = []
 var knight_run_frames: Array[Texture2D] = []
+var visual_start_position: Vector2 = Vector2.ZERO
+var visual_target_position: Vector2 = Vector2.ZERO
+var visual_move_elapsed: float = VISUAL_MOVE_SECONDS
 
 var role_data := {
 	"looter": {"color": Color(0.95, 0.80, 0.38), "traits": ["seeks treasure", "steals essence"]},
@@ -34,13 +38,14 @@ func initialize(new_role: String, start_tile: Vector2i, target_tile: Vector2i) -
 	role = new_role
 	tile_pos = start_tile
 	target = target_tile
-	_update_world_position()
+	_snap_world_position()
 
 func share_exploration_memory(memory: Dictionary) -> void:
 	explored_doors = memory
 
 func _process(delta: float) -> void:
 	anim_time += delta
+	_update_visual_position(delta)
 	queue_redraw()
 
 func _ensure_sprite_frames_loaded() -> void:
@@ -312,8 +317,35 @@ func _door_exit_neighbor(grid: DungeonGrid) -> Vector2i:
 		return candidates[0]
 	return candidates.pick_random()
 
+func _tile_world_position(coord: Vector2i) -> Vector2:
+	return Vector2(coord.x * TILE_SIZE + TILE_SIZE * 0.5, coord.y * TILE_SIZE + TILE_SIZE * 0.5)
+
+func _snap_world_position() -> void:
+	visual_target_position = _tile_world_position(tile_pos)
+	visual_start_position = visual_target_position
+	visual_move_elapsed = VISUAL_MOVE_SECONDS
+	position = visual_target_position
+
 func _update_world_position() -> void:
-	position = Vector2(tile_pos.x * TILE_SIZE + TILE_SIZE * 0.5, tile_pos.y * TILE_SIZE + TILE_SIZE * 0.5)
+	var target_position := _tile_world_position(tile_pos)
+	if position.distance_to(target_position) < 0.01:
+		visual_start_position = target_position
+		visual_target_position = target_position
+		visual_move_elapsed = VISUAL_MOVE_SECONDS
+		position = target_position
+		return
+	visual_start_position = position
+	visual_target_position = target_position
+	visual_move_elapsed = 0.0
+
+func _update_visual_position(delta: float) -> void:
+	if visual_move_elapsed >= VISUAL_MOVE_SECONDS:
+		position = visual_target_position
+		return
+	visual_move_elapsed = min(visual_move_elapsed + delta, VISUAL_MOVE_SECONDS)
+	var t := visual_move_elapsed / VISUAL_MOVE_SECONDS
+	var eased_t := t * t * (3.0 - 2.0 * t)
+	position = visual_start_position.lerp(visual_target_position, eased_t)
 
 func _draw() -> void:
 	_ensure_sprite_frames_loaded()
