@@ -559,7 +559,7 @@ func fill(coord: Vector2i) -> bool:
 	var tile: DungeonTileData = get_tile(coord)
 	if tile.kind != DungeonTileScript.Kind.FLOOR:
 		return false
-	if tile.structure != "":
+	if tile.structure != "" or tile.secret_tunnel:
 		clear_structure(coord)
 		return true
 	tile.set_stone()
@@ -572,13 +572,23 @@ func place_structure(coord: Vector2i, structure_name: String) -> bool:
 	var tile: DungeonTileData = get_tile(coord)
 	if not tile.is_walkable() or tile.kind == DungeonTileScript.Kind.ENTRANCE:
 		return false
-	if tile.structure != "":
+	if tile.structure != "" or tile.secret_tunnel:
 		return false
 	tile.structure = structure_name
 	if structure_name == "heart":
 		tile.heart_hp = 120
 	elif structure_name == "trap":
 		tile.trap_damage = 8
+	elif structure_name == "poison_trap":
+		tile.poison_damage = 2
+		tile.poison_duration = 4
+	elif structure_name == "locked_door":
+		tile.structure = "door"
+		tile.locked_door = true
+		tile.door_hp = 18
+	elif structure_name == "secret_tunnel":
+		tile.secret_tunnel = true
+		tile.structure = ""
 	queue_redraw()
 	return true
 
@@ -592,11 +602,11 @@ func can_place_monster_den(anchor: Vector2i) -> bool:
 		var tile: DungeonTileData = get_tile(coord)
 		if not tile.is_walkable() or tile.kind == DungeonTileScript.Kind.ENTRANCE:
 			return false
-		if tile.structure != "" or tile.den_id != -1:
+		if tile.structure != "" or tile.den_id != -1 or tile.secret_tunnel:
 			return false
 	return true
 
-func place_monster_den(anchor: Vector2i) -> bool:
+func place_monster_den(anchor: Vector2i, den_kind: String = "goblin") -> bool:
 	if not can_place_monster_den(anchor):
 		return false
 	var den_id := next_den_id
@@ -608,22 +618,26 @@ func place_monster_den(anchor: Vector2i) -> bool:
 		tile.den_id = den_id
 		tile.den_anchor = offset == Vector2i.ZERO
 		tile.den_spawn_progress = 0
+		tile.den_research_progress = 0
+		tile.den_kind = den_kind
+		tile.den_order = "guard_room"
+		tile.den_target = room_center_tile(anchor)
 	queue_redraw()
 	return true
+
+func place_carrion_den(anchor: Vector2i) -> bool:
+	return place_monster_den(anchor, "carrion")
 
 func clear_structure(coord: Vector2i) -> bool:
 	if not is_in_bounds(coord):
 		return false
 	var tile: DungeonTileData = get_tile(coord)
-	if tile.structure == "":
+	if tile.structure == "" and not tile.secret_tunnel:
 		return false
 	if tile.structure == "monster_den":
 		clear_monster_den(tile.den_id)
 		return true
-	tile.structure = ""
-	tile.heart_hp = 0
-	tile.trap_damage = 0
-	tile.locked_door = false
+	tile.clear_structure_state()
 	queue_redraw()
 	return true
 
@@ -636,6 +650,10 @@ func clear_monster_den(den_id: int) -> void:
 				tile.den_id = -1
 				tile.den_anchor = false
 				tile.den_spawn_progress = 0
+				tile.den_research_progress = 0
+				tile.den_kind = "goblin"
+				tile.den_order = "guard_room"
+				tile.den_target = Vector2i(-1, -1)
 	queue_redraw()
 
 func den_anchors() -> Array[Vector2i]:
@@ -656,6 +674,133 @@ func den_tiles(den_id: int) -> Array[Vector2i]:
 			if get_tile(coord).den_id == den_id:
 				result.append(coord)
 	return result
+
+func den_anchor_for_id(den_id: int) -> Vector2i:
+	for coord in den_tiles(den_id):
+		if get_tile(coord).den_anchor:
+			return coord
+	return Vector2i(-1, -1)
+
+func set_den_order(den_id: int, order: String, target: Vector2i) -> bool:
+	var tiles_for_den := den_tiles(den_id)
+	if tiles_for_den.is_empty():
+		return false
+	for coord in tiles_for_den:
+		var tile: DungeonTileData = get_tile(coord)
+		tile.den_order = order
+		tile.den_target = target
+	queue_redraw()
+	return true
+
+func room_tiles_from(start: Vector2i) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if not is_in_bounds(start):
+		return result
+	var start_tile: DungeonTileData = get_tile(start)
+	if not start_tile.is_walkable() or start_tile.structure == "door":
+		return result
+	var frontier: Array[Vector2i] = [start]
+	var visited: Dictionary = {start: true}
+	var cursor := 0
+	while cursor < frontier.size():
+		var current: Vector2i = frontier[cursor]
+		cursor += 1
+		result.append(current)
+		for neighbor in walkable_neighbors(current):
+			if visited.has(neighbor):
+				continue
+			visited[neighbor] = true
+			if get_tile(neighbor).structure == "door":
+				continue
+			frontier.append(neighbor)
+	return result
+
+func room_center_tile(start: Vector2i) -> Vector2i:
+	var room := room_tiles_from(start)
+	if room.is_empty():
+		return start
+	var sum := Vector2.ZERO
+	for coord in room:
+		sum += Vector2(coord.x, coord.y)
+	var average := sum / float(room.size())
+	var best: Vector2i = room[0]
+	var best_distance := 999999.0
+	for coord in room:
+		var distance := Vector2(coord.x, coord.y).distance_squared_to(average)
+		if distance < best_distance:
+			best = coord
+			best_distance = distance
+	return best
+
+func room_profile_from(start: Vector2i) -> Dictionary:
+	var room := room_tiles_from(start)
+	var profile := {
+		"identity": "none",
+		"label": "None",
+		"size": room.size(),
+		"door_count": 0,
+		"treasure_count": 0,
+		"trap_count": 0,
+		"den_count": 0,
+		"heart_count": 0,
+		"avg_magic": 0.0,
+	}
+	if room.is_empty():
+		return profile
+	var doors := {}
+	var magic_total := 0.0
+	for coord in room:
+		var tile: DungeonTileData = get_tile(coord)
+		magic_total += tile.magic
+		if tile.structure == "treasure":
+			profile["treasure_count"] += 1
+		elif tile.structure == "trap" or tile.structure == "poison_trap":
+			profile["trap_count"] += 1
+		elif tile.structure == "monster_den" and tile.den_anchor:
+			profile["den_count"] += 1
+		elif tile.structure == "heart":
+			profile["heart_count"] += 1
+		for neighbor in get_cardinal_neighbors(coord):
+			if is_in_bounds(neighbor) and get_tile(neighbor).structure == "door":
+				doors[neighbor] = true
+	profile["door_count"] = doors.size()
+	profile["avg_magic"] = magic_total / float(room.size())
+	var identity := "chamber"
+	var label := "Chamber"
+	if int(profile["heart_count"]) > 0:
+		identity = "heart_chamber"
+		label = "Heart chamber"
+	elif int(profile["den_count"]) > 0 and int(profile["door_count"]) > 0 and float(profile["avg_magic"]) >= 42.0:
+		identity = "research_chamber"
+		label = "Research chamber"
+	elif int(profile["trap_count"]) >= 2:
+		identity = "trap_hall"
+		label = "Trap hall"
+	elif int(profile["treasure_count"]) > 0:
+		identity = "treasure_vault"
+		label = "Treasure vault"
+	elif int(profile["den_count"]) > 0:
+		identity = "hatchery"
+		label = "Hatchery"
+	elif room.size() <= 5:
+		identity = "corridor"
+		label = "Corridor"
+	profile["identity"] = identity
+	profile["label"] = label
+	return profile
+
+func nearest_room_door(start: Vector2i) -> Vector2i:
+	var room := room_tiles_from(start)
+	var best := Vector2i(-1, -1)
+	var best_distance := 999999.0
+	for coord in room:
+		for neighbor in get_cardinal_neighbors(coord):
+			if is_in_bounds(neighbor) and get_tile(neighbor).structure == "door":
+				var distance := start.distance_squared_to(neighbor)
+				if distance < best_distance:
+					best = neighbor
+					best_distance = distance
+	return best
 
 func find_structure(structure_name: String) -> Vector2i:
 	for x in range(GRID_SIZE):
@@ -754,6 +899,12 @@ func shortest_path_length_avoiding(from_coord: Vector2i, to_coord: Vector2i, blo
 	return -1
 
 func find_path(from_coord: Vector2i, to_coord: Vector2i) -> Array[Vector2i]:
+	return _find_path_internal(from_coord, to_coord, {})
+
+func find_path_for_crawler(from_coord: Vector2i, to_coord: Vector2i, discovered_secret_tunnels: Dictionary = {}) -> Array[Vector2i]:
+	return _find_path_internal(from_coord, to_coord, discovered_secret_tunnels, true)
+
+func _find_path_internal(from_coord: Vector2i, to_coord: Vector2i, discovered_secret_tunnels: Dictionary = {}, avoid_secret_tunnels: bool = false) -> Array[Vector2i]:
 	if not is_in_bounds(from_coord) or not is_in_bounds(to_coord):
 		return []
 	if not get_tile(from_coord).is_walkable() or not get_tile(to_coord).is_walkable():
@@ -767,6 +918,8 @@ func find_path(from_coord: Vector2i, to_coord: Vector2i) -> Array[Vector2i]:
 		if current == to_coord:
 			break
 		for neighbor in walkable_neighbors(current):
+			if avoid_secret_tunnels and get_tile(neighbor).secret_tunnel and not discovered_secret_tunnels.has(neighbor):
+				continue
 			if not came_from.has(neighbor):
 				came_from[neighbor] = current
 				frontier.append(neighbor)
@@ -1065,6 +1218,14 @@ func _draw_tile_effects(coord: Vector2i, rect: Rect2) -> void:
 	if tile.temperature > 65.0:
 		var heat_alpha := clampf((tile.temperature - 55.0) / 130.0, 0.08, 0.35)
 		draw_line(center + Vector2(-7, sin(shimmer_time * 5.0 + coord.y) * 3.0), center + Vector2(7, sin(shimmer_time * 5.0 + coord.x) * 3.0), Color(1.0, 0.58, 0.12, heat_alpha), 1.2)
+	if tile.poison_cloud_ticks > 0:
+		draw_circle(center, 13.0 + sin(shimmer_time * 5.0 + coord.x) * 1.4, Color(0.36, 0.95, 0.22, 0.20))
+	if tile.magic_field_ticks > 0:
+		draw_circle(center, 12.0, Color(0.70, 0.28, 1.0, 0.22))
+		draw_circle(center + Vector2(sin(shimmer_time * 4.0 + coord.x) * 5.0, cos(shimmer_time * 3.0 + coord.y) * 5.0), 2.2, Color(0.92, 0.65, 1.0, 0.55))
+	if tile.secret_tunnel:
+		draw_circle(center, 6.5, Color(0.12, 0.06, 0.02, 0.72))
+		draw_circle(center, 3.0 + sin(shimmer_time * 4.0) * 0.8, Color(0.56, 0.38, 0.20, 0.42))
 	_draw_structure(tile, center)
 
 func _draw_structure(tile: DungeonTileData, center: Vector2) -> void:
@@ -1094,6 +1255,14 @@ func _draw_structure(tile: DungeonTileData, center: Vector2) -> void:
 				for i in range(3):
 					var x := -7.0 + i * 7.0
 					draw_polygon(PackedVector2Array([center + Vector2(x, 6), center + Vector2(x + 3, -6), center + Vector2(x + 6, 6)]), PackedColorArray([Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72), Color(0.78, 0.78, 0.72)]))
+		"poison_trap":
+			draw_rect(Rect2(center - Vector2(11, 11), Vector2(22, 22)), Color(0.12, 0.28, 0.08, 0.42), true)
+			for i in range(3):
+				var angle := shimmer_time * 1.8 + float(i) * TAU / 3.0
+				draw_circle(center + Vector2(cos(angle), sin(angle)) * 6.5, 2.5, Color(0.38, 0.95, 0.22, 0.72))
 		"door":
 			if dungeon_door_texture != null:
 				draw_texture_rect(dungeon_door_texture, Rect2(center - Vector2(16, 19), Vector2(32, 32)), false)
+			if tile.locked_door:
+				draw_rect(Rect2(center - Vector2(9, 12), Vector2(18, 22)), Color(0.96, 0.78, 0.34, 0.32), false, 2.0)
+				draw_circle(center + Vector2(0, -2), 3.0, Color(0.95, 0.78, 0.32, 0.9))

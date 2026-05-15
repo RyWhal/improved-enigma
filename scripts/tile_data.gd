@@ -24,9 +24,20 @@ var structure: String = ""
 var heart_hp: int = 0
 var trap_damage: int = 0
 var locked_door: bool = false
+var door_hp: int = 0
+var poison_damage: int = 0
+var poison_duration: int = 0
+var secret_tunnel: bool = false
 var den_id: int = -1
 var den_anchor: bool = false
 var den_spawn_progress: int = 0
+var den_research_progress: int = 0
+var den_kind: String = "goblin"
+var den_order: String = "guard_room"
+var den_target: Vector2i = Vector2i(-1, -1)
+var poison_cloud_ticks: int = 0
+var poison_cloud_damage: float = 0.0
+var magic_field_ticks: int = 0
 var planning_floor_cost: int = 0
 var planning_structure_cost: int = 0
 
@@ -61,8 +72,14 @@ func tile_name() -> String:
 		return "treasure cache"
 	if structure == "trap":
 		return "spike trap"
+	if structure == "poison_trap":
+		return "poison trap"
+	if structure == "monster_den":
+		return "carrion den" if den_kind == "carrion" else "goblin den"
 	if structure == "door":
-		return "dungeon door"
+		return "locked dungeon door" if locked_door else "dungeon door"
+	if secret_tunnel:
+		return "secret tunnel"
 	match kind:
 		Kind.FLOOR:
 			return "cave floor"
@@ -79,21 +96,35 @@ func set_floor() -> void:
 	darkness = max(darkness, 88.0)
 	moisture = max(moisture, 24.0)
 
-func set_stone() -> void:
-	kind = Kind.STONE
+func clear_structure_state() -> void:
 	structure = ""
 	heart_hp = 0
 	trap_damage = 0
 	locked_door = false
+	door_hp = 0
+	poison_damage = 0
+	poison_duration = 0
+	secret_tunnel = false
+
+func set_stone() -> void:
+	kind = Kind.STONE
+	clear_structure_state()
 	den_id = -1
 	den_anchor = false
 	den_spawn_progress = 0
+	den_research_progress = 0
+	den_kind = "goblin"
+	den_order = "guard_room"
+	den_target = Vector2i(-1, -1)
 	planning_floor_cost = 0
 	planning_structure_cost = 0
 	heat_source = false
 	moisture_source = false
 	magic_source = false
 	spore_seed = false
+	poison_cloud_ticks = 0
+	poison_cloud_damage = 0.0
+	magic_field_ticks = 0
 
 func snapshot() -> Dictionary:
 	return {
@@ -112,9 +143,20 @@ func snapshot() -> Dictionary:
 		"heart_hp": heart_hp,
 		"trap_damage": trap_damage,
 		"locked_door": locked_door,
+		"door_hp": door_hp,
+		"poison_damage": poison_damage,
+		"poison_duration": poison_duration,
+		"secret_tunnel": secret_tunnel,
 		"den_id": den_id,
 		"den_anchor": den_anchor,
 		"den_spawn_progress": den_spawn_progress,
+		"den_research_progress": den_research_progress,
+		"den_kind": den_kind,
+		"den_order": den_order,
+		"den_target": den_target,
+		"poison_cloud_ticks": poison_cloud_ticks,
+		"poison_cloud_damage": poison_cloud_damage,
+		"magic_field_ticks": magic_field_ticks,
 		"planning_floor_cost": planning_floor_cost,
 		"planning_structure_cost": planning_structure_cost,
 	}
@@ -135,9 +177,20 @@ func restore(snapshot_data: Dictionary) -> void:
 	heart_hp = int(snapshot_data["heart_hp"])
 	trap_damage = int(snapshot_data["trap_damage"])
 	locked_door = bool(snapshot_data["locked_door"])
+	door_hp = int(snapshot_data.get("door_hp", 0))
+	poison_damage = int(snapshot_data.get("poison_damage", 0))
+	poison_duration = int(snapshot_data.get("poison_duration", 0))
+	secret_tunnel = bool(snapshot_data.get("secret_tunnel", false))
 	den_id = int(snapshot_data.get("den_id", -1))
 	den_anchor = bool(snapshot_data.get("den_anchor", false))
 	den_spawn_progress = int(snapshot_data.get("den_spawn_progress", 0))
+	den_research_progress = int(snapshot_data.get("den_research_progress", 0))
+	den_kind = String(snapshot_data.get("den_kind", "goblin"))
+	den_order = String(snapshot_data.get("den_order", "guard_room"))
+	den_target = snapshot_data.get("den_target", Vector2i(-1, -1))
+	poison_cloud_ticks = int(snapshot_data.get("poison_cloud_ticks", 0))
+	poison_cloud_damage = float(snapshot_data.get("poison_cloud_damage", 0.0))
+	magic_field_ticks = int(snapshot_data.get("magic_field_ticks", 0))
 	planning_floor_cost = int(snapshot_data["planning_floor_cost"])
 	planning_structure_cost = int(snapshot_data["planning_structure_cost"])
 

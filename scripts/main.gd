@@ -9,6 +9,61 @@ const BOSS_RESPAWN_BIOMASS_COST := 120
 const BOSS_RESPAWN_ESSENCE_COST := 60
 const BASE_EXPAND_INFLUENCE_COST := 70
 const EXPAND_INFLUENCE_COST_STEP := 30
+const UNLIMITED_RESOURCE_AMOUNT := 999999
+const RESEARCH_TICKS_PER_KNOWLEDGE := 8
+const RESEARCH_UPGRADE_DEFS := {
+	"dungeon_praxis": {"costs": [8, 14, 22], "label": "Dungeon Praxis", "prereqs": {}},
+	"stonecraft": {"costs": [10, 18], "label": "Stonecraft", "prereqs": {"dungeon_praxis": 1}},
+	"goblin_warrens": {"costs": [10], "label": "Goblin Warrens", "prereqs": {"dungeon_praxis": 1}},
+	"hardened_brood": {"costs": [14, 22, 34], "label": "Hardened Brood", "prereqs": {"goblin_warrens": 1}},
+	"quickened_brood": {"costs": [18, 28, 42], "label": "Quickened Brood", "prereqs": {"hardened_brood": 1}},
+	"feral_vitality": {"costs": [22, 36], "label": "Feral Vitality", "prereqs": {"hardened_brood": 1}},
+	"den_fertility": {"costs": [18, 30, 44], "label": "Den Fertility", "prereqs": {"quickened_brood": 1}},
+	"skeleton_servitors": {"costs": [20], "label": "Skeleton Servitors", "prereqs": {"hardened_brood": 1}},
+	"hexbound_kin": {"costs": [24], "label": "Hexbound Kin", "prereqs": {"dungeon_praxis": 2}},
+	"ember_pact": {"costs": [28], "label": "Ember Pact", "prereqs": {"hexbound_kin": 1}},
+	"bog_brood": {"costs": [28], "label": "Bog Brood", "prereqs": {"hardened_brood": 1}},
+	"heart_pupation": {"costs": [24], "label": "Heart Pupation", "prereqs": {"dungeon_praxis": 2}},
+	"heart_bulk": {"costs": [20, 34, 52], "label": "Heart Bulk", "prereqs": {"heart_pupation": 1}},
+	"heart_violence": {"costs": [22, 38, 56], "label": "Heart Violence", "prereqs": {"heart_pupation": 1}},
+	"heart_dominion": {"costs": [70], "label": "Heart Dominion", "prereqs": {"heart_bulk": 2, "heart_violence": 2}},
+	"reinforced_doors": {"costs": [16, 28], "label": "Reinforced Doors", "prereqs": {"stonecraft": 1}},
+	"poison_craft": {"costs": [18, 32], "label": "Poison Craft", "prereqs": {"dungeon_praxis": 1}},
+	"hidden_ways": {"costs": [20, 34], "label": "Hidden Ways", "prereqs": {"stonecraft": 1}},
+	"claimed_spoils": {"costs": [16, 28], "label": "Claimed Spoils", "prereqs": {"dungeon_praxis": 1}},
+	"fearful_reclamation": {"costs": [34], "label": "Fearful Reclamation", "prereqs": {"claimed_spoils": 1}},
+	"arcane_spawning": {"costs": [32], "label": "Arcane Spawning", "prereqs": {"hexbound_kin": 1}},
+}
+const BASE_TOOL_COSTS := {
+	"dig": 1,
+	"fill": 1,
+	"place_heart": 0,
+	"place_treasure": 5,
+	"place_trap": 6,
+	"place_poison_trap": 8,
+	"place_door": 3,
+	"place_locked_door": 7,
+	"place_secret_tunnel": 4,
+	"place_monster_den": 16,
+	"place_carrion_den": 14,
+	"move_heart": 20,
+	"moisture_source": 5,
+	"heat_vent": 5,
+	"magic_seep": 8,
+	"seed_spore_root": 6,
+	"seed_carrion_mite": 4,
+	"spawn_carrion_mite": 4,
+	"poison_cloud": 6,
+	"magic_field": 6,
+	"heal": 5,
+	"respawn_boss": 0,
+	"explode_spores": 0,
+	"expand_influence": 0,
+	"den_order_guard_heart": 0,
+	"den_order_guard_room": 0,
+	"den_order_patrol": 0,
+	"den_order_ambush_door": 0,
+}
 
 @onready var grid: DungeonGrid = $Grid
 @onready var simulation: DungeonSimulation = $Simulation
@@ -32,28 +87,18 @@ var drag_preview_tiles: Dictionary = {}
 var sim_accumulator: float = 0.0
 var incursion_timer: float = 22.0
 var night_paused: bool = false
+var wave_number: int = 0
+var last_wave_size: int = 0
+var last_wave_pressure: int = 0
 var natural_spawn_timer: float = 6.0
 var boss_respawn_ticks: int = 0
 var camera_speed: float = 680.0
+var run_mode: String = ""
+var start_menu_active: bool = true
 var action_failure_message: String = ""
-var tool_costs: Dictionary = {
-	"dig": 1,
-	"fill": 1,
-	"place_heart": 0,
-	"place_treasure": 5,
-	"place_trap": 6,
-	"place_door": 3,
-	"place_monster_den": 16,
-	"move_heart": 20,
-	"moisture_source": 5,
-	"heat_vent": 5,
-	"magic_seep": 8,
-	"seed_spore_root": 6,
-	"seed_carrion_mite": 4,
-	"respawn_boss": 0,
-	"explode_spores": 0,
-	"expand_influence": 0,
-}
+var research_upgrades: Dictionary = {}
+var tool_costs: Dictionary = BASE_TOOL_COSTS.duplicate()
+var temporary_effect_tick: int = 0
 
 func _ready() -> void:
 	randomize()
@@ -61,41 +106,53 @@ func _ready() -> void:
 	simulation.configure(grid, resources)
 	simulation.log_event.connect(_log_event)
 	ui.bind_resources(resources)
+	resources.changed.connect(func(_values: Dictionary) -> void: _sync_research_ui())
 	ui.tool_selected.connect(func(tool: String) -> void: selected_tool = tool)
 	ui.overlay_selected.connect(func(overlay: String) -> void: grid.set_overlay(overlay))
 	ui.undo_requested.connect(_undo_planning_action)
 	ui.start_requested.connect(_start_dungeon)
 	ui.restart_requested.connect(_restart_run)
 	ui.night_pause_toggled.connect(_set_night_paused)
+	ui.den_order_requested.connect(_set_den_order_from_ui)
+	ui.research_upgrade_requested.connect(_buy_research_upgrade)
+	ui.mode_selected.connect(_select_run_mode)
 	camera.position = grid.tile_to_world(grid.start_center)
 	ui.set_phase("Planning Phase")
-	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+	_sync_night_ui()
+	_sync_research_ui()
 	_update_build_warnings()
 	ui.show_message("Plan your first dungeon. Dig from the entrance, place the Heart, then start the run.")
+	ui.show_start_menu()
 	_log_event("New dungeon run started.")
 
 func _process(delta: float) -> void:
+	if start_menu_active:
+		return
 	_handle_camera(delta)
 	if planning_phase or dungeon_inert:
-		ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+		_sync_night_ui()
 		return
 	sim_accumulator += delta
 	if sim_accumulator >= 0.28:
 		sim_accumulator = 0.0
 		_prune_dead_entities()
 		simulation.step(creatures, adventurers)
+		_apply_temporary_tile_effects()
 		_check_heart_state()
 		_update_boss_respawn_timer()
+		_try_research_rooms()
 		_try_den_spawns()
 		_try_natural_spawn()
 	if not night_paused:
 		incursion_timer -= delta
 		if incursion_timer <= 0.0:
 			_spawn_incursion()
-			incursion_timer = randf_range(28.0, 45.0)
-	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+			incursion_timer = _next_wave_delay()
+	_sync_night_ui()
 
 func _unhandled_input(event: InputEvent) -> void:
+	if start_menu_active:
+		return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			camera.zoom = (camera.zoom * 1.08).clamp(Vector2(0.35, 0.35), Vector2(1.8, 1.8))
@@ -136,6 +193,37 @@ func _handle_camera(delta: float) -> void:
 		var world_size: int = DungeonGrid.GRID_SIZE * DungeonGrid.TILE_SIZE
 		camera.position = camera.position.clamp(Vector2.ZERO, Vector2(world_size, world_size))
 
+func _select_run_mode(mode: String) -> void:
+	match mode:
+		"standard":
+			run_mode = "standard"
+			start_menu_active = false
+			ui.hide_start_menu()
+			ui.set_phase("Planning Phase")
+			ui.show_message("Plan your first dungeon. Dig from the entrance, place the Heart, then start the run.")
+			_sync_night_ui()
+			_sync_research_ui()
+		"unlimited_build":
+			run_mode = "unlimited_build"
+			start_menu_active = false
+			_apply_unlimited_build_mode()
+			ui.hide_start_menu()
+			ui.set_phase("Unlimited Build")
+			ui.show_message("Unlimited Build: resources and research are unlocked for testing.")
+			_sync_night_ui()
+			_sync_research_ui()
+
+func _apply_unlimited_build_mode() -> void:
+	for resource_name in ["essence", "biomass", "magic", "bone", "fear", "knowledge"]:
+		resources.set_amount(resource_name, UNLIMITED_RESOURCE_AMOUNT)
+	research_upgrades.clear()
+	for upgrade_id in RESEARCH_UPGRADE_DEFS.keys():
+		var costs: Array = RESEARCH_UPGRADE_DEFS[upgrade_id].get("costs", [])
+		research_upgrades[upgrade_id] = costs.size()
+	tool_costs = BASE_TOOL_COSTS.duplicate()
+	resources.set_looted_spoils_rank(_research_rank("claimed_spoils"))
+	resources.set_fearful_reclamation_rank(_research_rank("fearful_reclamation"))
+
 func _handle_click(coord: Vector2i) -> void:
 	if not grid.is_in_bounds(coord):
 		return
@@ -148,12 +236,12 @@ func _handle_click(coord: Vector2i) -> void:
 		if adventurer != null:
 			ui.show_adventurer_info(adventurer)
 			return
-		ui.show_tile_info(coord, grid.get_tile(coord), _mutation_conditions_near(coord))
+		ui.show_tile_info(coord, grid.get_tile(coord), _mutation_conditions_near(coord), grid.room_profile_from(coord))
 		return
 	if selected_tool == "expand_influence":
 		_expand_influence_at(coord)
 		return
-	if planning_phase and not selected_tool in ["dig", "fill", "place_heart", "place_treasure", "place_trap", "place_door", "place_monster_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root", "expand_influence"]:
+	if planning_phase and not selected_tool in ["dig", "fill", "place_heart", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "place_monster_den", "place_carrion_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root", "expand_influence", "den_order_guard_heart", "den_order_guard_room", "den_order_patrol", "den_order_ambush_door"]:
 		ui.show_message("Natural shaping unlocks after the dungeon starts. Use build tools during planning.")
 		return
 	if not _has_influence_for_tool(coord):
@@ -174,10 +262,33 @@ func _handle_click(coord: Vector2i) -> void:
 			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_structure(coord, "treasure"))
 		"place_trap":
 			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_structure(coord, "trap"))
+		"place_poison_trap":
+			_apply_tile_action(coord, selected_tool, func() -> bool:
+				if _research_rank("poison_craft") <= 0:
+					return _fail_action("Research Poison Craft before placing poison traps.")
+				return grid.place_structure(coord, "poison_trap")
+			)
 		"place_door":
 			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_structure(coord, "door"))
+		"place_locked_door":
+			_apply_tile_action(coord, selected_tool, func() -> bool:
+				if _research_rank("reinforced_doors") <= 0:
+					return _fail_action("Research Reinforced Doors before placing locked doors.")
+				var placed := grid.place_structure(coord, "locked_door")
+				if placed:
+					grid.get_tile(coord).door_hp += max(0, _research_rank("reinforced_doors") - 1) * 10
+				return placed
+			)
+		"place_secret_tunnel":
+			_apply_tile_action(coord, selected_tool, func() -> bool:
+				if _research_rank("hidden_ways") <= 0:
+					return _fail_action("Research Hidden Ways before placing secret tunnels.")
+				return grid.place_structure(coord, "secret_tunnel")
+			)
 		"place_monster_den":
-			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_monster_den(coord))
+			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_monster_den(coord, "goblin"))
+		"place_carrion_den":
+			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_carrion_den(coord))
 		"moisture_source":
 			_apply_source_action(coord, selected_tool, func(tile: DungeonTileData) -> void:
 				tile.moisture_source = true
@@ -201,12 +312,26 @@ func _handle_click(coord: Vector2i) -> void:
 					tile.biomass = max(tile.biomass, 28.0)
 			elif _spend_and_require_floor(coord, "biomass", int(tool_costs[selected_tool])):
 				_spawn_creature("spore_root", coord)
-		"seed_carrion_mite":
+		"seed_carrion_mite", "spawn_carrion_mite":
 			_seed_carrion_mite(coord)
 		"respawn_boss":
 			_respawn_boss()
 		"explode_spores":
 			_explode_spores(coord)
+		"poison_cloud":
+			_place_poison_cloud(coord)
+		"magic_field":
+			_place_magic_field(coord)
+		"heal":
+			_heal_at(coord)
+		"den_order_guard_heart":
+			_set_den_order_at(coord, "guard_heart")
+		"den_order_guard_room":
+			_set_den_order_at(coord, "guard_room")
+		"den_order_patrol":
+			_set_den_order_at(coord, "patrol")
+		"den_order_ambush_door":
+			_set_den_order_at(coord, "ambush_door")
 	grid.queue_redraw()
 
 func _begin_drag_preview(coord: Vector2i) -> void:
@@ -365,7 +490,7 @@ func _apply_tile_action(coord: Vector2i, tool: String, action: Callable) -> void
 		var tile: DungeonTileData = grid.get_tile(coord)
 		if tool == "dig":
 			tile.planning_floor_cost += cost
-		elif tool in ["place_heart", "place_treasure", "place_trap", "place_door", "place_monster_den"]:
+		elif tool in ["place_heart", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "place_monster_den", "place_carrion_den"]:
 			tile.planning_structure_cost += cost
 		planning_history.append({"coord": coord, "before": before, "cost": cost})
 		_update_build_warnings()
@@ -408,7 +533,7 @@ func _heart_path_survives_fill_batch(coords: Array[Vector2i], is_planning: bool)
 			return true
 		if not is_planning and tile.structure == "heart":
 			return false
-		var clears_floor := tile.kind == DungeonTileScript.Kind.FLOOR and tile.structure == ""
+		var clears_floor := tile.kind == DungeonTileScript.Kind.FLOOR and tile.structure == "" and not tile.secret_tunnel
 		if is_planning and (tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed):
 			clears_floor = false
 		if clears_floor:
@@ -425,7 +550,7 @@ func _fill_preserving_heart_access(coord: Vector2i) -> bool:
 		return false
 	if tile.structure == "heart":
 		return _fail_action("The Heart cannot be filled in.")
-	if tile.structure != "":
+	if tile.structure != "" or tile.secret_tunnel:
 		return grid.fill(coord)
 	if not _heart_path_survives_blocked_tiles([coord]):
 		return _fail_action("The Heart must remain reachable from the entrance.")
@@ -468,12 +593,9 @@ func _erase_planning_tile(coord: Vector2i, announce: bool = true, refresh_warnin
 		if announce:
 			ui.show_message("Monster den erased. Refunded %s essence." % den_refund)
 		return true
-	if tile.structure != "":
+	if tile.structure != "" or tile.secret_tunnel:
 		var refund: int = tile.planning_structure_cost
-		tile.structure = ""
-		tile.heart_hp = 0
-		tile.trap_damage = 0
-		tile.locked_door = false
+		grid.clear_structure(coord)
 		tile.planning_structure_cost = 0
 		resources.add("essence", refund)
 		heart_coord = grid.find_structure("heart")
@@ -560,6 +682,8 @@ func _undo_planning_action() -> void:
 	ui.show_message("Planning action undone.")
 
 func _start_dungeon() -> void:
+	if start_menu_active and run_mode == "":
+		_select_run_mode("standard")
 	heart_coord = grid.find_structure("heart")
 	if heart_coord == Vector2i(-1, -1):
 		ui.show_message("The dungeon needs a Heart before it can awaken.")
@@ -575,7 +699,10 @@ func _start_dungeon() -> void:
 	_spawn_boss_larva()
 	incursion_timer = 7.0
 	night_paused = false
-	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+	wave_number = 0
+	last_wave_size = 0
+	last_wave_pressure = 0
+	_sync_night_ui()
 	ui.show_message("The dungeon wakes. Protect the Heart; it will not heal on its own.")
 	_log_event("The dungeon wakes.")
 
@@ -601,15 +728,24 @@ func _restart_run() -> void:
 	sim_accumulator = 0.0
 	incursion_timer = 22.0
 	night_paused = false
+	wave_number = 0
+	last_wave_size = 0
+	last_wave_pressure = 0
 	natural_spawn_timer = 6.0
 	boss_respawn_ticks = 0
+	run_mode = ""
+	start_menu_active = true
+	research_upgrades.clear()
+	tool_costs = BASE_TOOL_COSTS.duplicate()
 	resources.reset()
 	grid.generate_planning_map()
 	camera.position = grid.tile_to_world(grid.start_center)
 	ui.set_phase("Planning Phase")
-	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+	_sync_night_ui()
+	_sync_research_ui()
 	_update_build_warnings()
 	ui.show_message("Plan your next dungeon. Place the Heart, then start the run.")
+	ui.show_start_menu()
 	_log_event("Run restarted.")
 
 func _update_build_warnings() -> void:
@@ -647,6 +783,8 @@ func _expand_influence_at(coord: Vector2i) -> bool:
 	return true
 
 func _expand_influence_cost() -> int:
+	if run_mode == "unlimited_build":
+		return 0
 	return BASE_EXPAND_INFLUENCE_COST + maxi(grid.unlocked_chunk_count() - 1, 0) * EXPAND_INFLUENCE_COST_STEP
 
 func _set_night_paused(paused: bool) -> void:
@@ -654,7 +792,11 @@ func _set_night_paused(paused: bool) -> void:
 		night_paused = false
 	else:
 		night_paused = paused
-	ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert)
+	_sync_night_ui()
+
+func _sync_night_ui() -> void:
+	if ui != null:
+		ui.set_night_countdown(incursion_timer, night_paused, planning_phase, dungeon_inert, wave_number + 1, _wave_pressure_for_next_wave())
 
 func _spend_and_require_floor(coord: Vector2i, resource_name: String, cost: int) -> bool:
 	if not grid.get_tile(coord).is_walkable():
@@ -699,6 +841,97 @@ func _seed_carrion_mite(coord: Vector2i) -> void:
 		return
 	_spawn_creature("carrion_mite", coord)
 
+func _place_poison_cloud(coord: Vector2i) -> bool:
+	if not grid.get_tile(coord).is_walkable():
+		ui.show_message("Poison clouds need open dungeon floor.")
+		return false
+	var cost: int = int(tool_costs.get("poison_cloud", 0))
+	if cost > 0 and not resources.spend("magic", cost):
+		ui.show_message("Need %s magic." % cost)
+		return false
+	for x in range(coord.x - 1, coord.x + 2):
+		for y in range(coord.y - 1, coord.y + 2):
+			var cloud_coord := Vector2i(x, y)
+			if not grid.is_in_bounds(cloud_coord):
+				continue
+			var tile: DungeonTileData = grid.get_tile(cloud_coord)
+			if tile.is_walkable():
+				tile.poison_cloud_ticks = 10
+				tile.poison_cloud_damage = 1.8
+	_log_event("A poison cloud blooms in the dungeon.")
+	grid.queue_redraw()
+	return true
+
+func _place_magic_field(coord: Vector2i) -> bool:
+	if not grid.get_tile(coord).is_walkable():
+		ui.show_message("Magic fields need open dungeon floor.")
+		return false
+	var cost: int = int(tool_costs.get("magic_field", 0))
+	if cost > 0 and not resources.spend("magic", cost):
+		ui.show_message("Need %s magic." % cost)
+		return false
+	for x in range(coord.x - 1, coord.x + 2):
+		for y in range(coord.y - 1, coord.y + 2):
+			var field_coord := Vector2i(x, y)
+			if not grid.is_in_bounds(field_coord):
+				continue
+			var tile: DungeonTileData = grid.get_tile(field_coord)
+			if tile.is_walkable():
+				tile.magic_field_ticks = 12
+				tile.magic = min(tile.magic + 6.0, 100.0)
+	_log_event("A strengthening magic field hums open.")
+	grid.queue_redraw()
+	return true
+
+func _heal_at(coord: Vector2i) -> bool:
+	if not grid.is_in_bounds(coord):
+		return false
+	var cost: int = int(tool_costs.get("heal", 0))
+	var creature = _creature_at(coord)
+	var heart_tile: DungeonTileData = grid.get_tile(coord)
+	if creature == null and heart_tile.structure != "heart":
+		ui.show_message("Heal needs a monster, boss, or the Heart.")
+		return false
+	if cost > 0 and not resources.spend("magic", cost):
+		ui.show_message("Need %s magic." % cost)
+		return false
+	if creature != null:
+		creature.hp = min(creature.hp + 18.0, max(creature.max_hp, creature.hp + 1.0))
+		_log_event("The dungeon knits a wounded %s." % creature.species.replace("_", " "))
+		return true
+	heart_tile.heart_hp = mini(120, heart_tile.heart_hp + 20)
+	_log_event("The Heart drinks a rare pulse of healing magic.")
+	grid.queue_redraw()
+	return true
+
+func _apply_temporary_tile_effects() -> void:
+	temporary_effect_tick += 1
+	for x in range(DungeonGrid.GRID_SIZE):
+		for y in range(DungeonGrid.GRID_SIZE):
+			var tile: DungeonTileData = grid.get_tile(Vector2i(x, y))
+			if tile.poison_cloud_ticks > 0:
+				tile.poison_cloud_ticks -= 1
+			if tile.magic_field_ticks > 0:
+				tile.magic_field_ticks -= 1
+	for adventurer in adventurers:
+		if not is_instance_valid(adventurer) or adventurer.is_queued_for_deletion():
+			continue
+		if not grid.is_in_bounds(adventurer.tile_pos):
+			continue
+		var tile: DungeonTileData = grid.get_tile(adventurer.tile_pos)
+		if tile.poison_cloud_ticks > 0:
+			adventurer.hp -= max(tile.poison_cloud_damage, 1.0)
+			if temporary_effect_tick % 3 == 0:
+				_log_event("%s coughs in a poison cloud." % String(adventurer.role).capitalize())
+	for creature in creatures:
+		if not is_instance_valid(creature) or creature.is_queued_for_deletion():
+			continue
+		if not grid.is_in_bounds(creature.tile_pos):
+			continue
+		if grid.get_tile(creature.tile_pos).magic_field_ticks > 0:
+			creature.apply_magic_field_bonus(5, 2.0)
+	grid.queue_redraw()
+
 func _seed_initial_ecosystem() -> void:
 	var seed_center: Vector2i = heart_coord if heart_coord != Vector2i(-1, -1) else grid.start_center
 	for x in range(1, DungeonGrid.GRID_SIZE - 1):
@@ -716,12 +949,66 @@ func _seed_initial_ecosystem() -> void:
 func _spawn_creature(species: String, coord: Vector2i) -> DungeonCreature:
 	if not grid.is_in_bounds(coord) or not grid.get_tile(coord).is_walkable():
 		return null
+	var spawn_coord := _nearest_open_creature_tile(coord)
+	if spawn_coord == Vector2i(-1, -1):
+		return null
 	var creature: DungeonCreature = CreatureScene.instantiate() as DungeonCreature
 	grid.add_child(creature)
-	creature.initialize(species, coord)
+	creature.initialize(species, spawn_coord)
+	_apply_research_bonuses(creature)
 	creature.log_event.connect(_log_event)
 	creatures.append(creature)
 	return creature
+
+func _apply_research_bonuses(creature: DungeonCreature) -> void:
+	if creature.species in ["goblin", "skeleton_servitor", "hex_goblin", "ember_imp", "bog_mite", "cinder_witch"]:
+		var hardened_rank := _research_rank("hardened_brood")
+		if hardened_rank > 0:
+			creature.hp += 5.0 * hardened_rank
+			creature.max_hp += 5.0 * hardened_rank
+			if not creature.traits.has("hardened"):
+				creature.traits.append("hardened")
+		var quickened_rank := _research_rank("quickened_brood")
+		if quickened_rank > 0:
+			creature.move_cooldown = -quickened_rank
+			if not creature.traits.has("quickened"):
+				creature.traits.append("quickened")
+		var lifesteal_rank := _research_rank("feral_vitality")
+		if lifesteal_rank > 0:
+			creature.lifesteal_chance = 0.06 * lifesteal_rank
+			if not creature.traits.has("lifesteal"):
+				creature.traits.append("lifesteal")
+	if creature.species.begins_with("heart_"):
+		var bulk_rank := _research_rank("heart_bulk")
+		if bulk_rank > 0:
+			creature.hp += 25.0 * bulk_rank
+			creature.max_hp += 25.0 * bulk_rank
+			if not creature.traits.has("bulked"):
+				creature.traits.append("bulked")
+		var violence_rank := _research_rank("heart_violence")
+		if violence_rank > 0:
+			creature.attack_bonus += 4.0 * violence_rank
+			if not creature.traits.has("violent"):
+				creature.traits.append("violent")
+		creature.boss_can_evolve = _research_rank("heart_pupation") > 0
+
+func _nearest_open_creature_tile(coord: Vector2i) -> Vector2i:
+	if grid.is_in_bounds(coord) and grid.get_tile(coord).is_walkable() and _creature_at(coord) == null:
+		return coord
+	var frontier: Array[Vector2i] = [coord]
+	var visited: Dictionary = {coord: true}
+	var cursor := 0
+	while cursor < frontier.size() and cursor < 96:
+		var current: Vector2i = frontier[cursor]
+		cursor += 1
+		for neighbor in grid.walkable_neighbors(current):
+			if visited.has(neighbor):
+				continue
+			visited[neighbor] = true
+			if _creature_at(neighbor) == null:
+				return neighbor
+			frontier.append(neighbor)
+	return Vector2i(-1, -1)
 
 func _spawn_boss_larva() -> void:
 	if heart_coord == Vector2i(-1, -1) or _count_bosses() > 0:
@@ -788,8 +1075,11 @@ func _explode_spores(coord: Vector2i) -> bool:
 func _try_den_spawns() -> void:
 	for anchor in grid.den_anchors():
 		var tile: DungeonTileData = grid.get_tile(anchor)
+		if tile.den_order == "research":
+			continue
 		tile.den_spawn_progress += 1
-		if tile.den_spawn_progress < 18:
+		var spawn_threshold: int = max(6, 18 - _research_rank("den_fertility") * 6)
+		if tile.den_spawn_progress < spawn_threshold:
 			continue
 		tile.den_spawn_progress = 0
 		if _creatures_near(anchor, 7) >= 4:
@@ -798,8 +1088,64 @@ func _try_den_spawns() -> void:
 		if spawn_coord == Vector2i(-1, -1):
 			continue
 		var species := _species_for_den(tile.den_id)
-		_spawn_creature(species, spawn_coord)
-		_log_event("Monster den spawns a %s." % species.replace("_", " "))
+		var spawned := _spawn_creature(species, spawn_coord)
+		if spawned != null:
+			_configure_den_spawn(spawned, tile.den_id)
+		_log_event("%s spawns a %s." % [_den_display_name(tile.den_id), species.replace("_", " ")])
+
+func _try_research_rooms() -> void:
+	for anchor in grid.den_anchors():
+		var tile: DungeonTileData = grid.get_tile(anchor)
+		if tile.den_order != "research":
+			continue
+		if not _den_is_qualified_research_room(tile.den_id):
+			continue
+		var scholars := _research_scholars_for_den(tile.den_id)
+		if scholars <= 0:
+			var spawned := _spawn_creature("goblin", anchor)
+			if spawned != null:
+				_configure_den_spawn(spawned, tile.den_id)
+				scholars = 1
+		if scholars <= 0:
+			continue
+		tile.den_research_progress += scholars
+		if tile.den_research_progress >= RESEARCH_TICKS_PER_KNOWLEDGE:
+			var gained := maxi(1, int(tile.den_research_progress / RESEARCH_TICKS_PER_KNOWLEDGE))
+			tile.den_research_progress %= RESEARCH_TICKS_PER_KNOWLEDGE
+			resources.add("knowledge", gained)
+			_log_event("A research den distills %s knowledge." % gained)
+
+func _research_scholars_for_den(den_id: int) -> int:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor == Vector2i(-1, -1):
+		return 0
+	var room := grid.room_tiles_from(anchor)
+	var room_lookup := {}
+	for coord in room:
+		room_lookup[coord] = true
+	var count := 0
+	for creature in creatures:
+		if not is_instance_valid(creature) or creature.is_queued_for_deletion():
+			continue
+		if creature.den_id == den_id and creature.species in ["goblin", "hex_goblin"]:
+			if room_lookup.has(creature.tile_pos):
+				count += 1
+	return count
+
+func _den_is_qualified_research_room(den_id: int) -> bool:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor == Vector2i(-1, -1):
+		return false
+	if grid.nearest_room_door(anchor) == Vector2i(-1, -1):
+		return false
+	var room := grid.room_tiles_from(anchor)
+	var magic_total := 0.0
+	for coord in room:
+		var tile: DungeonTileData = grid.get_tile(coord)
+		if tile.magic_source:
+			return true
+		magic_total += tile.magic
+	return not room.is_empty() and magic_total / float(room.size()) >= 42.0
 
 func _den_spawn_tile(den_id: int) -> Vector2i:
 	var candidates: Array[Vector2i] = []
@@ -813,7 +1159,76 @@ func _den_spawn_tile(den_id: int) -> Vector2i:
 		return Vector2i(-1, -1)
 	return candidates.pick_random()
 
+func _configure_den_spawn(creature: DungeonCreature, den_id: int) -> void:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor == Vector2i(-1, -1):
+		return
+	var den_tile: DungeonTileData = grid.get_tile(anchor)
+	creature.den_id = den_id
+	creature.den_order = den_tile.den_order
+	creature.home_tile = anchor
+	creature.command_target = _den_command_target(anchor, den_tile.den_order)
+
+func _set_den_order_at(coord: Vector2i, order: String) -> bool:
+	if not grid.is_in_bounds(coord):
+		return false
+	var tile: DungeonTileData = grid.get_tile(coord)
+	if tile.den_id == -1:
+		ui.show_message("Click a den to assign that order.")
+		return false
+	return _set_den_order_for_den(tile.den_id, order, true)
+
+func _set_den_order_from_ui(den_id: int, order: String) -> void:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if _set_den_order_for_den(den_id, order, false) and anchor != Vector2i(-1, -1):
+		ui.show_tile_info(anchor, grid.get_tile(anchor), _mutation_conditions_near(anchor), grid.room_profile_from(anchor))
+
+func _set_den_order_for_den(den_id: int, order: String, show_message_on_success: bool = true) -> bool:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor == Vector2i(-1, -1):
+		return false
+	if order == "research" and not _den_is_qualified_research_room(den_id):
+		ui.show_message("Research dens need a magical room with a door boundary.")
+		return false
+	var target := _den_command_target(anchor, order)
+	if order == "ambush_door" and target == Vector2i(-1, -1):
+		ui.show_message("That den's room has no door to ambush.")
+		return false
+	grid.set_den_order(den_id, order, target)
+	for creature in creatures:
+		if is_instance_valid(creature) and creature.den_id == den_id:
+			creature.den_order = order
+			creature.command_target = target
+	if show_message_on_success:
+		ui.show_message("%s order: %s." % [_den_display_name(den_id), order.replace("_", " ").capitalize()])
+	return true
+
+func _den_display_name(den_id: int) -> String:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor == Vector2i(-1, -1):
+		return "Den"
+	return "Carrion den" if grid.get_tile(anchor).den_kind == "carrion" else "Goblin den"
+
+func _den_command_target(anchor: Vector2i, order: String) -> Vector2i:
+	match order:
+		"guard_heart":
+			return grid.find_structure("heart")
+		"guard_room":
+			return grid.room_center_tile(anchor)
+		"patrol":
+			return anchor
+		"ambush_door":
+			var door := grid.nearest_room_door(anchor)
+			if door != Vector2i(-1, -1):
+				return door
+		"research":
+			return anchor
+	return grid.room_center_tile(anchor)
+
 func _species_for_den(den_id: int) -> String:
+	var anchor := grid.den_anchor_for_id(den_id)
+	if anchor != Vector2i(-1, -1) and grid.get_tile(anchor).den_kind == "carrion":
+		return "carrion_mite"
 	var totals := {"magic": 0.0, "temperature": 0.0, "moisture": 0.0, "biomass": 0.0}
 	var count := 0.0
 	for coord in grid.den_tiles(den_id):
@@ -830,34 +1245,156 @@ func _species_for_den(den_id: int) -> String:
 	var avg_moisture: float = totals["moisture"] / count
 	var avg_biomass: float = totals["biomass"] / count
 	if avg_magic >= 65.0 and avg_heat >= 70.0:
+		if _research_rank("ember_pact") <= 0:
+			return "hex_goblin" if _research_rank("hexbound_kin") > 0 else "goblin"
 		return "cinder_witch"
 	if avg_moisture >= 60.0 and avg_biomass >= 35.0:
+		if _research_rank("bog_brood") <= 0:
+			return "goblin"
 		return "bog_mite"
 	if avg_heat >= 70.0:
+		if _research_rank("ember_pact") <= 0:
+			return "goblin"
 		return "ember_imp"
 	if avg_magic >= 65.0:
-		return "hex_goblin"
+		if _research_rank("arcane_spawning") > 0:
+			return "cinder_witch"
+		return "hex_goblin" if _research_rank("hexbound_kin") > 0 else "goblin"
+	if _research_rank("skeleton_servitors") > 0 and avg_biomass >= 20.0:
+		return "skeleton_servitor"
 	return "goblin"
+
+func _buy_research_upgrade(upgrade_id: String) -> bool:
+	if not RESEARCH_UPGRADE_DEFS.has(upgrade_id):
+		return false
+	var definition: Dictionary = RESEARCH_UPGRADE_DEFS[upgrade_id]
+	var costs: Array = definition.get("costs", [])
+	var current_rank := _research_rank(upgrade_id)
+	if current_rank >= costs.size():
+		ui.show_message("Research already completed.")
+		return false
+	if not _research_prereqs_met(definition.get("prereqs", {})):
+		ui.show_message("Research prerequisites are not met.")
+		return false
+	var cost: int = int(costs[current_rank])
+	if not resources.spend("knowledge", cost):
+		ui.show_message("Need %s knowledge." % cost)
+		return false
+	research_upgrades[upgrade_id] = current_rank + 1
+	_apply_research_side_effect(upgrade_id)
+	_apply_research_upgrade_to_existing(upgrade_id)
+	_sync_research_ui()
+	ui.show_message("Research complete: %s %s." % [String(definition["label"]), current_rank + 1])
+	_log_event("Research complete: %s %s." % [String(definition["label"]), current_rank + 1])
+	return true
+
+func _research_rank(upgrade_id: String) -> int:
+	return int(research_upgrades.get(upgrade_id, 0))
+
+func _research_prereqs_met(prereqs: Dictionary) -> bool:
+	for upgrade_id in prereqs.keys():
+		if _research_rank(upgrade_id) < int(prereqs[upgrade_id]):
+			return false
+	return true
+
+func _apply_research_side_effect(upgrade_id: String) -> void:
+	match upgrade_id:
+		"stonecraft":
+			tool_costs["dig"] = maxi(0, 1 - _research_rank("stonecraft"))
+		"poison_craft":
+			tool_costs["place_poison_trap"] = maxi(4, 8 - _research_rank("poison_craft"))
+		"reinforced_doors":
+			tool_costs["place_locked_door"] = maxi(4, 7 - _research_rank("reinforced_doors"))
+		"claimed_spoils":
+			resources.set_looted_spoils_rank(_research_rank("claimed_spoils"))
+		"fearful_reclamation":
+			resources.set_fearful_reclamation_rank(_research_rank("fearful_reclamation"))
+
+func _apply_research_upgrade_to_existing(upgrade_id: String) -> void:
+	for creature in creatures:
+		if not is_instance_valid(creature) or creature.is_queued_for_deletion():
+			continue
+		match upgrade_id:
+			"hardened_brood":
+				if creature.species in ["goblin", "skeleton_servitor", "hex_goblin", "ember_imp", "bog_mite", "cinder_witch"]:
+					creature.hp += 5.0
+					creature.max_hp += 5.0
+					if not creature.traits.has("hardened"):
+						creature.traits.append("hardened")
+			"quickened_brood":
+				if creature.species in ["goblin", "skeleton_servitor", "hex_goblin", "ember_imp", "bog_mite", "cinder_witch"]:
+					creature.move_cooldown = min(creature.move_cooldown, -_research_rank("quickened_brood"))
+					if not creature.traits.has("quickened"):
+						creature.traits.append("quickened")
+			"feral_vitality":
+				if not creature.species.begins_with("heart_"):
+					creature.lifesteal_chance = max(creature.lifesteal_chance, 0.06 * _research_rank("feral_vitality"))
+					if not creature.traits.has("lifesteal"):
+						creature.traits.append("lifesteal")
+			"heart_bulk":
+				if creature.species.begins_with("heart_"):
+					creature.hp += 45.0
+					creature.max_hp += 45.0
+					if not creature.traits.has("bulked"):
+						creature.traits.append("bulked")
+			"heart_violence":
+				if creature.species.begins_with("heart_"):
+					creature.attack_bonus += 4.0
+					if not creature.traits.has("violent"):
+						creature.traits.append("violent")
+			"heart_pupation":
+				if creature.species.begins_with("heart_"):
+					creature.boss_can_evolve = true
+
+func _sync_research_ui() -> void:
+	if ui != null:
+		ui.set_research_state(research_upgrades, resources.get_amount("knowledge"), RESEARCH_UPGRADE_DEFS)
 
 func _spawn_incursion() -> void:
 	var active_count := _active_adventurer_count()
 	if active_count >= MAX_ACTIVE_CRAWLERS:
 		_log_event("Crawler party waits outside; too many crawlers are already active.")
 		return
-	var roles: Array[String] = ["looter", "torchbearer", "hunter"]
-	var count: int = 1 + int(resources.get_amount("fear") / 12)
+	wave_number += 1
+	last_wave_pressure = _wave_pressure_for_wave(wave_number)
+	var roles: Array[String] = _roles_for_wave(wave_number)
+	var count: int = _wave_size_for_pressure(last_wave_pressure)
 	var party_explored_doors: Dictionary = {}
-	for i in range(mini(clampi(count, 1, 5), MAX_ACTIVE_CRAWLERS - active_count)):
+	last_wave_size = mini(clampi(count, 1, 8), MAX_ACTIVE_CRAWLERS - active_count)
+	for i in range(last_wave_size):
 		var role: String = roles.pick_random()
 		var adventurer: DungeonAdventurer = AdventurerScene.instantiate() as DungeonAdventurer
 		grid.add_child(adventurer)
 		adventurer.initialize(role, grid.entrance_tile, _find_incursion_target(role))
+		adventurer.secret_tunnel_discover_chance = 0.04 / max(1, _research_rank("hidden_ways"))
 		adventurer.share_exploration_memory(party_explored_doors)
 		adventurer.log_event.connect(_log_event)
-		adventurer.hp += resources.get_amount("fear") * 0.25
+		adventurer.hp += float(last_wave_pressure) * 0.65
 		adventurers.append(adventurer)
-	ui.show_message("A crawler party enters. Fear has reached %s." % resources.get_amount("fear"))
-	_log_event("A crawler party enters. Fear %s." % resources.get_amount("fear"))
+	ui.show_message("Wave %s enters. Pressure %s." % [wave_number, last_wave_pressure])
+	_log_event("Wave %s enters with %s crawlers. Pressure %s." % [wave_number, last_wave_size, last_wave_pressure])
+	_sync_night_ui()
+
+func _wave_pressure_for_next_wave() -> int:
+	return _wave_pressure_for_wave(wave_number + 1)
+
+func _wave_pressure_for_wave(target_wave: int) -> int:
+	return maxi(1, target_wave + int(resources.get_amount("fear") / 18))
+
+func _wave_size_for_pressure(pressure: int) -> int:
+	return clampi(1 + int(ceil(float(pressure) / 2.0)), 2, 8)
+
+func _roles_for_wave(target_wave: int) -> Array[String]:
+	var roles: Array[String] = ["looter"]
+	if target_wave >= 2 or resources.get_amount("fear") >= 10:
+		roles.append("torchbearer")
+	if target_wave >= 3 or resources.get_amount("fear") >= 24:
+		roles.append("hunter")
+	return roles
+
+func _next_wave_delay() -> float:
+	var pressure := _wave_pressure_for_next_wave()
+	return clampf(46.0 - float(pressure) * 2.4, 18.0, 44.0)
 
 func _active_adventurer_count() -> int:
 	var count := 0

@@ -27,12 +27,29 @@ func _initialize() -> void:
 	await _test_night_countdown_can_be_paused()
 	_test_build_warnings_are_warning_only()
 	await _test_hud_does_not_block_world_input()
+	await _test_start_menu_selects_standard_tutorial_and_unlimited_modes()
 	await _test_hud_uses_collapsed_menus_and_top_resource_bar()
+	await _test_content_tools_are_grouped_and_named()
+	await _test_inspect_ui_shows_rich_npc_stats()
+	await _test_den_orders_are_contextual_inspect_actions()
+	await _test_research_den_generates_knowledge_and_research_tree_upgrades()
+	await _test_ranked_evolution_tree_prerequisites_and_effects()
+	await _test_research_unlocks_locked_doors_poison_traps_secret_tunnels_and_looted_spoils()
+	await _test_research_tree_ui_shows_branches_costs_prereqs_and_effects()
+	await _test_research_popup_scrolls_full_tree()
+	await _test_wave_director_escalates_and_updates_hud()
+	await _test_room_identity_profiles_inspect_and_den_context()
 	_test_entities_interpolate_between_tile_steps()
 	await _test_heart_must_be_reachable_to_place_start_and_fill()
 	await _test_planning_heart_is_free_and_fill_refunds()
+	await _test_planning_fill_clears_secret_tunnel_without_erasing_floor()
+	await _test_structure_clearing_resets_all_tile_state()
 	await _test_build_phase_sources_and_monster_den()
 	await _test_monster_den_requires_clear_2x2()
+	await _test_carrion_den_spawns_mites_like_a_den()
+	_test_rooms_treat_doors_as_boundaries()
+	await _test_den_orders_are_assigned_and_inherited()
+	_test_monsters_avoid_ending_on_the_same_tile()
 	await _test_live_heart_can_be_moved_for_essence()
 	await _test_live_fill_removes_door()
 	await _test_essence_can_seed_emergency_mite()
@@ -44,9 +61,11 @@ func _initialize() -> void:
 	_test_mite_defends_against_nearby_crawler()
 	await _test_monster_den_spawns_by_environment()
 	await _test_heart_larva_spawns_and_stays_near_heart()
+	await _test_boss_patrols_near_heart_without_roaming()
 	await _test_boss_larva_is_sturdier_and_hits_harder()
 	await _test_boss_can_be_respawned_after_delay()
 	await _test_direct_mite_spam_cost_increases()
+	await _test_special_actions_spawn_cloud_field_and_heal()
 	await _test_exploding_spores_damage_crawlers_and_break_walls()
 	_test_heart_is_durable_defenseless_and_does_not_regen()
 	_test_crawler_retargets_to_treasure_then_heart()
@@ -61,9 +80,10 @@ func _initialize() -> void:
 	_test_crawler_disrupts_any_source_then_continues()
 	_test_crawler_attacks_visible_creature()
 	_test_crawler_does_not_farm_knowledge_each_magic_step()
+	_test_looted_spoils_require_research()
 	_test_mutation_pressure()
 	if failures == 0:
-		print("Dungeon Tycoon smoke tests passed")
+		print("Heartwarren smoke tests passed")
 	quit(failures)
 
 func _require(condition: bool, message: String) -> void:
@@ -77,6 +97,13 @@ func _test_tileset_assets_available() -> void:
 	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/atlas_walls_high-16x32.png"), "0x72 high wall atlas should be available")
 	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/doors_leaf_closed.png"), "0x72 door sprite should be available")
 	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/chest_full_open_anim_f0.png"), "0x72 treasure chest sprite should be available")
+	_require(FileAccess.file_exists("res://assets/ui/action_icons.png"), "generated action icon atlas should be available")
+	var icon_file := FileAccess.open("res://assets/ui/action_icons.png", FileAccess.READ)
+	_require(icon_file != null, "generated action icon atlas should be readable")
+	if icon_file != null:
+		var icon_image := Image.new()
+		_require(icon_image.load_png_from_buffer(icon_file.get_buffer(icon_file.get_length())) == OK, "generated action icon atlas should decode")
+		_require(icon_image.detect_alpha() != Image.ALPHA_NONE, "generated action icon atlas should include transparent pixels")
 	for floor_index in range(1, 9):
 		_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/frames/floor_%s.png" % floor_index), "0x72 floor_%s sprite should be available" % floor_index)
 	for frame_index in range(4):
@@ -317,6 +344,187 @@ func _test_drag_dig_and_fill_preview_commits_on_release() -> void:
 	_require(main.resources.get_amount("essence") == start_essence, "batched planning fill should refund erased floor")
 	main.free()
 
+func _test_ranked_evolution_tree_prerequisites_and_effects() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	main.resources.set_amount("knowledge", 500)
+	_require(not main.call("_buy_research_upgrade", "heart_bulk"), "Heart Bulk should require Heart Pupation first")
+	_require(main.call("_buy_research_upgrade", "dungeon_praxis"), "Dungeon Praxis rank 1 should be purchasable")
+	_require(main.call("_buy_research_upgrade", "dungeon_praxis"), "Dungeon Praxis should support multiple ranks")
+	_require(int(main.research_upgrades.get("dungeon_praxis", 0)) == 2, "research upgrades should store ranks as integers")
+	_require(main.call("_buy_research_upgrade", "goblin_warrens"), "Goblin Warrens should unlock after Dungeon Praxis")
+	_require(main.call("_buy_research_upgrade", "hardened_brood"), "Hardened Brood rank 1 should unlock after Goblin Warrens")
+	_require(main.call("_buy_research_upgrade", "hardened_brood"), "Hardened Brood should support rank 2")
+	_require(main.call("_buy_research_upgrade", "quickened_brood"), "Quickened Brood should unlock after Hardened Brood")
+	_require(main.call("_buy_research_upgrade", "den_fertility"), "Den Fertility should unlock from the brood branch")
+	_require(main.call("_buy_research_upgrade", "heart_pupation"), "Heart Pupation should unlock the boss juvenile evolution")
+	_require(main.call("_buy_research_upgrade", "heart_bulk"), "Heart Bulk should unlock after Heart Pupation")
+	_require(main.call("_buy_research_upgrade", "heart_violence"), "Heart Violence should unlock after Heart Pupation")
+	var den_monster = main.call("_spawn_creature", "goblin", main.grid.entrance_tile)
+	_require(den_monster != null and den_monster.hp > 15.0, "ranked Hardened Brood should stack monster HP bonuses")
+	_require(den_monster != null and den_monster.move_cooldown <= -1, "Quickened Brood should mark den monsters as faster")
+	main.grid.place_structure(main.grid.entrance_tile, "heart")
+	var boss = main.call("_spawn_creature", "heart_larva", main.grid.entrance_tile)
+	_require(boss != null and boss.hp > 100.0, "ranked Heart Bulk should increase boss HP")
+	_require(boss != null and boss.attack_damage() > 8.0, "Heart Violence should increase boss attack")
+	if boss != null:
+		boss.age = 240
+		boss.call("simulate_step", main.grid, [boss], [], main.resources)
+		_require(boss.species == "heart_juvenile", "Heart Pupation should allow the larva to evolve through research")
+	main.free()
+
+func _test_research_unlocks_locked_doors_poison_traps_secret_tunnels_and_looted_spoils() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	main.resources.set_amount("knowledge", 800)
+	for upgrade_id in [
+		"dungeon_praxis",
+		"dungeon_praxis",
+		"stonecraft",
+		"reinforced_doors",
+		"poison_craft",
+		"hidden_ways",
+		"goblin_warrens",
+		"hardened_brood",
+		"quickened_brood",
+		"feral_vitality",
+		"den_fertility",
+		"claimed_spoils",
+	]:
+		main.call("_buy_research_upgrade", upgrade_id)
+	_require(main.tool_costs["dig"] == 0, "Stonecraft should reduce tunnel digging cost")
+	var door = main.grid.entrance_tile + Vector2i.RIGHT
+	var poison = door + Vector2i.RIGHT
+	var secret = poison + Vector2i.RIGHT
+	for coord in [door, poison, secret]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_locked_door"
+	main.call("_handle_click", door)
+	_require(main.grid.get_tile(door).structure == "door" and main.grid.get_tile(door).locked_door, "Reinforced Doors should unlock locked door placement")
+	_require(main.grid.get_tile(door).door_hp > 1, "locked doors should have extra HP")
+	main.selected_tool = "place_poison_trap"
+	main.call("_handle_click", poison)
+	_require(main.grid.get_tile(poison).structure == "poison_trap", "Poison Craft should unlock poison trap placement")
+	main.selected_tool = "place_secret_tunnel"
+	main.call("_handle_click", secret)
+	_require(main.grid.get_tile(secret).secret_tunnel, "Hidden Ways should unlock secret tunnels")
+	var crawler = AdventurerScript.new()
+	crawler.call("initialize", "looter", door, secret)
+	crawler.secret_tunnel_discover_chance = 0.0
+	var door_hp_before: int = main.grid.get_tile(door).door_hp
+	crawler.call("simulate_step", main.grid, [], main.resources)
+	_require(main.grid.get_tile(door).door_hp < door_hp_before, "crawlers should damage locked doors before passing")
+	crawler.tile_pos = poison
+	crawler.call("simulate_step", main.grid, [], main.resources)
+	_require(crawler.poison_ticks > 0, "poison traps should apply poison over time")
+	var secret_path: Array = main.grid.call("find_path_for_crawler", poison, secret, {})
+	_require(secret_path.is_empty(), "crawlers should not normally path through undiscovered secret tunnels")
+	var monster_path: Array = main.grid.call("find_path", poison, secret)
+	_require(not monster_path.is_empty(), "monsters should be able to path through secret tunnels")
+	crawler.looted_essence = 3
+	var essence_before: int = main.resources.get_amount("essence")
+	crawler.hp = 0
+	crawler.call("simulate_step", main.grid, [], main.resources)
+	_require(main.resources.get_amount("essence") > essence_before, "Claimed Spoils should recover stolen treasure from dead crawlers")
+	var den = secret + Vector2i.RIGHT
+	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+		main.grid.call("dig", coord)
+	main.grid.call("place_monster_den", den)
+	var den_tile: DungeonTileData = main.grid.get_tile(den)
+	for i in range(12):
+		main.call("_try_den_spawns")
+	_require(den_tile.den_spawn_progress == 0 or main.creatures.size() > 0, "Den Fertility should shorten den spawn timing")
+	crawler.free()
+	main.free()
+
+func _test_research_tree_ui_shows_branches_costs_prereqs_and_effects() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var research_content = main.ui.find_child("ResearchContent", true, false)
+	_require(research_content.has_node("ResearchBranchMonsters"), "research popup should show a monster branch")
+	_require(research_content.has_node("ResearchBranchHeart"), "research popup should show a Heart branch")
+	_require(research_content.has_node("ResearchBranchDefense"), "research popup should show a defense branch")
+	var hardened_button := research_content.find_child("HardenedBroodResearchButton", true, false) as Button
+	var praxis_button := research_content.find_child("DungeonPraxisResearchButton", true, false) as Button
+	_require(hardened_button != null and hardened_button.disabled, "research buttons should lock when prerequisites are missing")
+	_require(hardened_button != null and hardened_button.text.contains("Locked"), "locked research buttons should say they are locked")
+	_require(hardened_button != null and hardened_button.tooltip_text.contains("Requires: Goblin Warrens 1"), "research tooltips should describe prerequisites")
+	_require(praxis_button != null and praxis_button.text.contains("8K"), "available research buttons should show the next knowledge cost")
+	main.resources.set_amount("knowledge", 100)
+	main.call("_buy_research_upgrade", "dungeon_praxis")
+	main.call("_buy_research_upgrade", "goblin_warrens")
+	_require(not hardened_button.disabled, "research buttons should unlock once prerequisites are met")
+	_require(hardened_button.text.contains("14K"), "unlocked ranked research should show its next cost")
+	_require(hardened_button.tooltip_text.contains("Effect:"), "research tooltips should describe effects")
+	main.free()
+
+func _test_research_popup_scrolls_full_tree() -> void:
+	var ui = UIScript.new()
+	get_root().add_child(ui)
+	await process_frame
+	var scroll = ui.get_node_or_null("HudRoot/ResearchPopup/PopupMargin/ResearchScroll") as ScrollContainer
+	_require(scroll != null, "research popup should use a scroll container so the full tree remains reachable")
+	if scroll != null:
+		_require(scroll.find_child("ResearchContent", true, false) != null, "research scroll should contain the research tree content")
+	ui.free()
+
+func _test_wave_director_escalates_and_updates_hud() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", heart)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.call("_start_dungeon")
+	main.resources.set_amount("fear", 36)
+	var before_wave: int = main.wave_number
+	main.call("_spawn_incursion")
+	_require(main.wave_number == before_wave + 1, "wave director should advance the wave number when crawlers enter")
+	_require(main.last_wave_size >= 2, "wave director should scale party size above the old one-crawler baseline")
+	_require(main.adventurers.size() >= main.last_wave_size, "wave director should spawn the announced wave size")
+	var first_crawler = main.adventurers[0]
+	_require(first_crawler.hp > 18.0, "wave director should scale crawler HP with wave pressure")
+	var countdown_label: Label = main.ui.get_node("HudRoot/TopResourceBar/ResourceRow/NightCountdown")
+	_require(countdown_label.text.contains("Wave"), "night countdown should show the next wave number")
+	_require(countdown_label.tooltip_text.contains("Pressure"), "night countdown tooltip should explain wave pressure")
+	main.free()
+
+func _test_room_identity_profiles_inspect_and_den_context() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var room_origin = main.grid.entrance_tile + Vector2i.RIGHT
+	var door = room_origin + Vector2i.RIGHT
+	var den = door + Vector2i.RIGHT
+	for coord in [room_origin, door, den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+		main.grid.call("dig", coord)
+	main.grid.call("place_structure", door, "door")
+	main.grid.call("place_monster_den", den)
+	for coord in main.grid.room_tiles_from(den):
+		main.grid.get_tile(coord).magic = 72.0
+	var profile: Dictionary = main.grid.call("room_profile_from", den)
+	_require(profile.get("identity", "") == "research_chamber", "magical den rooms behind doors should identify as research chambers")
+	_require(profile.get("door_count", 0) >= 1, "room identity should include door boundary counts")
+	main.selected_tool = "inspect"
+	main.call("_handle_click", den)
+	_require(main.ui.info_label.text.contains("Room: Research chamber"), "inspect should show readable room identity")
+	main.grid.call("place_structure", den + Vector2i.RIGHT, "treasure")
+	profile = main.grid.call("room_profile_from", den)
+	_require(profile.get("identity", "") == "research_chamber", "research identity should remain primary over secondary treasure")
+	main.grid.call("clear_structure", den)
+	main.grid.call("clear_structure", den + Vector2i.DOWN)
+	main.grid.call("place_structure", den, "trap")
+	main.grid.call("place_structure", den + Vector2i.DOWN, "poison_trap")
+	profile = main.grid.call("room_profile_from", den)
+	_require(profile.get("identity", "") == "trap_hall", "trap-heavy rooms should identify as trap halls")
+	main.free()
+
 func _test_building_is_limited_to_unlocked_chunks() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
@@ -377,6 +585,41 @@ func _test_hud_does_not_block_world_input() -> void:
 	_require(ui.call("should_block_world_input", ui.get_node("HudRoot/WarningsPopup")), "warnings popup should block world clicks behind UI")
 	ui.free()
 
+func _test_start_menu_selects_standard_tutorial_and_unlimited_modes() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	_require(main.ui.has_node("HudRoot/StartMenu"), "game should create a start mode menu")
+	var start_menu = main.ui.get_node("HudRoot/StartMenu") as Control
+	_require(start_menu.visible, "start menu should be visible on launch")
+	_require(main.ui.get_node("HudRoot/TopResourceBar").visible == false, "HUD controls should stay hidden before a mode is chosen")
+	var tutorial_button = main.ui.get_node("HudRoot/StartMenu/MenuPanel/MenuMargin/MenuContent/TutorialButton") as Button
+	tutorial_button.pressed.emit()
+	_require(start_menu.visible, "tutorial placeholder should stay on the start menu")
+	_require(main.ui.info_label.text.contains("Tutorial coming soon"), "tutorial placeholder should tell the player it is not implemented yet")
+	var standard_button = main.ui.get_node("HudRoot/StartMenu/MenuPanel/MenuMargin/MenuContent/StandardRunButton") as Button
+	standard_button.pressed.emit()
+	_require(not start_menu.visible, "standard run should close the start menu")
+	_require(main.run_mode == "standard", "standard run should preserve the current game mode")
+	_require(main.resources.get_amount("essence") == 140, "standard run should keep current starting essence")
+	_require(main.ui.get_node("HudRoot/TopResourceBar").visible, "HUD controls should show after choosing a mode")
+	main.call("_restart_run")
+	_require(start_menu.visible, "restart should return to mode selection")
+	var unlimited_button = main.ui.get_node("HudRoot/StartMenu/MenuPanel/MenuMargin/MenuContent/UnlimitedBuildButton") as Button
+	unlimited_button.pressed.emit()
+	_require(main.run_mode == "unlimited_build", "unlimited build should set a dedicated run mode")
+	_require(main.resources.get_amount("essence") >= 999999, "unlimited build should grant unlimited essence for testing")
+	_require(main.resources.get_amount("knowledge") >= 999999, "unlimited build should grant unlimited knowledge for testing")
+	_require(main.call("_research_rank", "poison_craft") > 0, "unlimited build should unlock research-gated build options")
+	_require(main.call("_expand_influence_cost") == 0, "unlimited build should remove influence expansion cost")
+	_require(not main.ui.start_button.disabled, "unlimited build should still allow pressing Go to start a live run")
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.ui.start_button.pressed.emit()
+	_require(not main.planning_phase, "Go should wake the dungeon from unlimited build mode")
+	main.free()
+
 func _test_hud_uses_collapsed_menus_and_top_resource_bar() -> void:
 	var ui = UIScript.new()
 	get_root().add_child(ui)
@@ -386,13 +629,35 @@ func _test_hud_uses_collapsed_menus_and_top_resource_bar() -> void:
 	_require(ui.has_node("HudRoot/TopResourceBar/ResourceRow/NightPauseButton"), "HUD should include a play/pause control for the next attack")
 	_require(ui.has_node("HudRoot/TopResourceBar/ResourceRow/EssenceResource"), "HUD should keep essence in the compact resource bar")
 	_require(ui.get_node("HudRoot/TopResourceBar/ResourceRow/EssenceResource").tooltip_text == "Essence", "resource icons should reveal full names on hover")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/CoreTools/DigTool"), "HUD should expose dig as a square rail button")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/BuildingsTools/PlaceDoorTool"), "HUD should group building tools in the rail")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/MonstersTools/SeedCarrionMiteTool"), "HUD should group dungeon monster tools in the rail")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/SpecialTools/ExplodeSporesTool"), "HUD should group special attack tools in the rail")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/OverlayTools/MagicOverlay"), "HUD should expose overlays as compact rail buttons")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/WarningsButton"), "warnings should live behind a rail button")
-	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/LogButton"), "game log should live behind a rail button")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/InspectPrimaryButton"), "HUD should keep inspect in the bottom primary action bar")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/BuildingsMenuButton"), "HUD should expose a bottom buildings menu button")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/MonstersMenuButton"), "HUD should expose a bottom monsters menu button")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/SpecialMenuButton"), "HUD should expose a bottom special menu button")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/OverlayMenuButton"), "HUD should expose a bottom overlay menu button")
+	var buildings_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/BuildingsMenuButton") as Button
+	buildings_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/DigTool"), "buildings menu should expand to show dig")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/PlaceDoorTool"), "buildings menu should expand to show doors")
+	var monsters_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/MonstersMenuButton") as Button
+	monsters_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceMonsterDenTool"), "monsters menu should expand to show monster tools")
+	var special_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/SpecialMenuButton") as Button
+	special_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/SpecialTools/ExplodeSporesTool"), "special menu should expand to show special attacks")
+	var overlay_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/OverlayMenuButton") as Button
+	overlay_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/OverlayTools/MagicOverlay"), "overlay menu should expand to show overlays")
+	await process_frame
+	buildings_button.pressed.emit()
+	await process_frame
+	var dig_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/DigTool") as Button
+	dig_button.pressed.emit()
+	_require(ui.current_tool == "dig", "reopening a rebuilt submenu and clicking a tool should not crash on stale button references")
+	_require(not ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/OrderTools"), "den orders should be contextual inspect actions, not global rail buttons")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/WarningsButton"), "warnings should live behind a bottom bar button")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/LogButton"), "game log should live behind a bottom bar button")
+	var tool_rail = ui.get_node("HudRoot/ToolRail") as Control
+	_require(tool_rail.anchor_top == 1.0 and tool_rail.anchor_bottom == 1.0, "bottom action bar should anchor to the bottom instead of stretching full screen")
 	_require(ui.has_node("HudRoot/WarningsPopup/PopupMargin/WarningsPopupText"), "warnings button should open a warnings popup")
 	_require(ui.has_node("HudRoot/LogPopup/PopupMargin/LogPopupText"), "log button should open a game log popup")
 	ui.set_warnings(["No treasure placed."])
@@ -400,6 +665,148 @@ func _test_hud_uses_collapsed_menus_and_top_resource_bar() -> void:
 	_require(ui.get_node("HudRoot/WarningsPopup/PopupMargin/WarningsPopupText").text.contains("No treasure placed."), "warnings popup should show current warnings")
 	_require(ui.get_node("HudRoot/LogPopup/PopupMargin/LogPopupText").text.contains("Crawler collected treasure."), "log popup should show recent game events")
 	ui.free()
+
+func _test_content_tools_are_grouped_and_named() -> void:
+	var ui = UIScript.new()
+	get_root().add_child(ui)
+	await process_frame
+	var buildings_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/BuildingsMenuButton") as Button
+	buildings_button.pressed.emit()
+	_require(not ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/PlaceHeartTool"), "Heart placement should move out of Buildings")
+	_require(not ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/PlaceMonsterDenTool"), "Goblin den placement should move out of Buildings")
+	_require(not ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/BuildingsTools/MoveHeartTool"), "Heart movement should move out of Buildings")
+	var monsters_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/MonstersMenuButton") as Button
+	monsters_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceHeartTool"), "Monsters and boss menu should include Place Heart")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceMonsterDenTool"), "Monsters and boss menu should include Goblin Den")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceCarrionDenTool"), "Monsters and boss menu should include Carrion Den")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/MoveHeartTool"), "Monsters and boss menu should include Move Heart")
+	var goblin_den_button = ui.get_node_or_null("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceMonsterDenTool") as Button
+	if goblin_den_button != null:
+		_require(goblin_den_button.tooltip_text == "Goblin Den", "renamed monster den should display as Goblin Den")
+	var carrion_den_button = ui.get_node_or_null("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/MonstersTools/PlaceCarrionDenTool") as Button
+	if carrion_den_button != null:
+		_require(carrion_den_button.tooltip_text == "Carrion Den", "new carrion den button should display as Carrion Den")
+	var special_button = ui.get_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/SpecialMenuButton") as Button
+	special_button.pressed.emit()
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/SpecialTools/SpawnCarrionMiteTool"), "Special menu should include immediate carrion mite spawn")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/SpecialTools/PoisonCloudTool"), "Special menu should include poison cloud")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/SpecialTools/MagicFieldTool"), "Special menu should include magic field")
+	_require(ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/ActionSubmenu/SpecialTools/HealTool"), "Special menu should include heal")
+	ui.free()
+
+func _test_inspect_ui_shows_rich_npc_stats() -> void:
+	var ui = UIScript.new()
+	get_root().add_child(ui)
+	await process_frame
+	var creature = CreatureScript.new()
+	creature.call("initialize", "goblin", Vector2i(4, 4))
+	creature.den_order = "guard_heart"
+	creature.command_target = Vector2i(8, 8)
+	ui.show_creature_info(creature)
+	var creature_text: String = ui.info_label.text
+	_require(creature_text.contains("Attack:"), "creature inspect should show attack damage")
+	_require(not creature_text.contains("Hunger:"), "creature inspect should not show hunger while hunger is not an active system")
+	_require(creature_text.contains("Status:"), "creature inspect should show behavior status")
+	_require(creature_text.contains("Order:"), "creature inspect should show den order")
+	_require(creature_text.contains("Target: 8,8"), "creature inspect should show command target")
+	var adventurer = AdventurerScript.new()
+	adventurer.call("initialize", "hunter", Vector2i(1, 1), Vector2i(6, 6))
+	adventurer.is_attacking = true
+	ui.show_adventurer_info(adventurer)
+	var adventurer_text: String = ui.info_label.text
+	_require(adventurer_text.contains("Attack:"), "crawler inspect should show attack damage")
+	_require(adventurer_text.contains("Intent:"), "crawler inspect should show role intent")
+	_require(adventurer_text.contains("Status:"), "crawler inspect should show current behavior status")
+	_require(adventurer_text.contains("Target: 6,6"), "crawler inspect should show current target")
+	creature.free()
+	adventurer.free()
+	ui.free()
+
+func _test_den_orders_are_contextual_inspect_actions() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	main.resources.set_amount("knowledge", 200)
+	for upgrade_id in ["dungeon_praxis", "dungeon_praxis", "hexbound_kin", "ember_pact"]:
+		main.call("_buy_research_upgrade", upgrade_id)
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	var den = heart + Vector2i.RIGHT
+	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", den)
+	main.selected_tool = "inspect"
+	main.call("_handle_click", den)
+	_require(main.ui.has_node("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/GuardHeartDenOrderButton"), "inspecting a monster den should show a Guard Heart order button")
+	var guard_button = main.ui.get_node_or_null("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/GuardHeartDenOrderButton")
+	if guard_button != null:
+		guard_button.pressed.emit()
+	_require(main.grid.call("get_tile", den).den_order == "guard_heart", "den inspect order button should assign the chosen order")
+	_require(main.ui.info_label.text.contains("Order guard heart"), "den inspect panel should refresh after assigning an order")
+	main.free()
+
+func _test_research_den_generates_knowledge_and_research_tree_upgrades() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	var door = heart + Vector2i.RIGHT
+	var den = door + Vector2i.RIGHT
+	for coord in [
+		heart,
+		door,
+		den,
+		den + Vector2i.RIGHT,
+		den + Vector2i.DOWN,
+		den + Vector2i.RIGHT + Vector2i.DOWN,
+		den + Vector2i(0, -1),
+	]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.selected_tool = "place_door"
+	main.call("_handle_click", door)
+	main.selected_tool = "magic_seep"
+	main.call("_handle_click", den + Vector2i(0, -1))
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", den)
+	main.selected_tool = "inspect"
+	main.call("_handle_click", den)
+	_require(main.ui.has_node("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/ResearchDenOrderButton"), "inspecting a den should show a Research order button")
+	var research_button = main.ui.get_node_or_null("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/ResearchDenOrderButton")
+	if research_button != null:
+		research_button.pressed.emit()
+	var den_id: int = main.grid.call("get_tile", den).den_id
+	_require(main.grid.call("get_tile", den).den_order == "research", "qualified research room should accept the Research order")
+	main.call("_start_dungeon")
+	main.creatures.clear()
+	var scholar = main.call("_spawn_creature", "goblin", den)
+	if scholar != null:
+		main.call("_configure_den_spawn", scholar, den_id)
+	var before_knowledge: int = main.resources.get_amount("knowledge")
+	for i in range(18):
+		main.call("_try_research_rooms")
+	_require(main.resources.get_amount("knowledge") > before_knowledge, "research den with goblin scholars should generate knowledge")
+	_require(main.ui.has_node("HudRoot/ToolRail/MarginContainer/Rail/PrimaryMenu/ResearchButton"), "HUD should expose the research tree behind a compact bottom bar button")
+	var research_content = main.ui.find_child("ResearchContent", true, false)
+	_require(research_content.find_child("HardenedBroodResearchButton", true, false) != null, "research popup should expose Hardened Brood")
+	main.resources.set_amount("knowledge", 200)
+	_require(main.call("_buy_research_upgrade", "dungeon_praxis"), "knowledge should buy Dungeon Praxis")
+	_require(main.call("_buy_research_upgrade", "dungeon_praxis"), "knowledge should buy Dungeon Praxis rank 2")
+	_require(main.call("_buy_research_upgrade", "goblin_warrens"), "knowledge should buy Goblin Warrens")
+	_require(main.call("_buy_research_upgrade", "hardened_brood"), "knowledge should buy Hardened Brood")
+	var upgraded = main.call("_spawn_creature", "goblin", den + Vector2i.RIGHT)
+	_require(upgraded != null and upgraded.hp > 10.0, "Hardened Brood should improve den-born monster HP")
+	_require(main.call("_buy_research_upgrade", "heart_pupation"), "knowledge should buy Heart Pupation")
+	_require(main.call("_buy_research_upgrade", "heart_bulk"), "knowledge should buy Heart Bulk")
+	var boss = main.call("_spawn_creature", "heart_larva", heart)
+	_require(boss != null and boss.hp > 85.0, "Heart Bulk should improve boss HP")
+	main.free()
 
 func _test_entities_interpolate_between_tile_steps() -> void:
 	var grid = GridScript.new()
@@ -507,6 +914,47 @@ func _test_planning_heart_is_free_and_fill_refunds() -> void:
 	_require(main.resources.get_amount("essence") == start_essence, "planning fill should erase and refund built floor")
 	main.free()
 
+func _test_planning_fill_clears_secret_tunnel_without_erasing_floor() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	main.resources.set_amount("knowledge", 200)
+	main.call("_buy_research_upgrade", "dungeon_praxis")
+	main.call("_buy_research_upgrade", "stonecraft")
+	main.call("_buy_research_upgrade", "hidden_ways")
+	var secret_coord = main.grid.entrance_tile + Vector2i.RIGHT
+	main.selected_tool = "place_secret_tunnel"
+	var essence_before: int = main.resources.get_amount("essence")
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).secret_tunnel, "test setup should place a planning secret tunnel")
+	_require(main.resources.get_amount("essence") == essence_before - int(main.tool_costs["place_secret_tunnel"]), "placing a secret tunnel should spend its planning cost")
+	main.selected_tool = "fill"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).is_walkable(), "planning fill should erase a secret tunnel without filling in the floor")
+	_require(not main.grid.get_tile(secret_coord).secret_tunnel, "planning fill should clear the secret tunnel flag")
+	_require(main.resources.get_amount("essence") == essence_before, "planning fill should refund the secret tunnel cost")
+	main.free()
+
+func _test_structure_clearing_resets_all_tile_state() -> void:
+	var grid = GridScript.new()
+	grid.call("generate_planning_map")
+	var poison: Vector2i = grid.entrance_tile + Vector2i.RIGHT
+	grid.call("place_structure", poison, "poison_trap")
+	_require(grid.call("clear_structure", poison), "clear_structure should remove poison traps")
+	_require(grid.get_tile(poison).poison_damage == 0 and grid.get_tile(poison).poison_duration == 0, "clear_structure should reset poison trap state")
+	var door: Vector2i = poison + Vector2i.RIGHT
+	grid.call("dig", door)
+	grid.call("place_structure", door, "locked_door")
+	_require(grid.call("clear_structure", door), "clear_structure should remove locked doors")
+	_require(not grid.get_tile(door).locked_door and grid.get_tile(door).door_hp == 0, "clear_structure should reset locked door state")
+	var secret: Vector2i = door + Vector2i.RIGHT
+	grid.call("dig", secret)
+	grid.call("place_structure", secret, "secret_tunnel")
+	_require(grid.get_tile(secret).secret_tunnel, "test setup should create a secret tunnel")
+	_require(grid.call("clear_structure", secret), "clear_structure should remove secret tunnels even though they have no structure string")
+	_require(not grid.get_tile(secret).secret_tunnel and grid.get_tile(secret).is_walkable(), "clearing a secret tunnel should keep the floor and clear the tunnel flag")
+	grid.free()
+
 func _test_build_phase_sources_and_monster_den() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
@@ -544,6 +992,102 @@ func _test_monster_den_requires_clear_2x2() -> void:
 		grid.call("dig", coord)
 	grid.call("place_structure", anchor, "treasure")
 	_require(not grid.call("place_monster_den", anchor), "monster den should reject occupied 2x2 floor")
+	grid.free()
+
+func _test_carrion_den_spawns_mites_like_a_den() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	var den = heart + Vector2i.RIGHT
+	for coord in [heart, den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.selected_tool = "place_carrion_den"
+	main.call("_handle_click", den)
+	var den_tile: DungeonTileData = main.grid.call("get_tile", den)
+	_require(den_tile.structure == "monster_den", "carrion den should use the den footprint")
+	_require(den_tile.den_kind == "carrion", "carrion den should store a carrion den kind")
+	main.call("_start_dungeon")
+	main.creatures.clear()
+	for i in range(24):
+		main.call("_try_den_spawns")
+	_require(main.call("_count_species", "carrion_mite") > 0, "carrion den should spawn carrion mites over time")
+	main.free()
+
+func _test_rooms_treat_doors_as_boundaries() -> void:
+	var grid = GridScript.new()
+	grid.call("generate_planning_map")
+	var left_room: Vector2i = grid.entrance_tile + Vector2i.RIGHT
+	var door: Vector2i = left_room + Vector2i.RIGHT
+	var right_room: Vector2i = door + Vector2i.RIGHT
+	for coord in [door, right_room, right_room + Vector2i.RIGHT]:
+		grid.call("dig", coord)
+	grid.call("place_structure", door, "door")
+	_require(grid.has_method("room_tiles_from"), "grid should expose room detection for command behavior")
+	if grid.has_method("room_tiles_from"):
+		var room: Array = grid.call("room_tiles_from", left_room)
+		_require(room.has(left_room), "room detection should include the starting floor")
+		_require(not room.has(door), "room detection should treat doors as boundaries")
+		_require(not room.has(right_room), "room detection should not flood through doors into the next room")
+	grid.free()
+
+func _test_den_orders_are_assigned_and_inherited() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	var den = heart + Vector2i.RIGHT
+	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", den)
+	main.selected_tool = "den_order_guard_heart"
+	main.call("_handle_click", den)
+	_require(main.grid.call("get_tile", den).den_order == "guard_heart", "clicking a den order should store that order on the den")
+	main.call("_start_dungeon")
+	main.creatures.clear()
+	for i in range(22):
+		main.call("_try_den_spawns")
+	var den_spawn = null
+	for creature in main.creatures:
+		if is_instance_valid(creature) and creature.den_id == main.grid.call("get_tile", den).den_id:
+			den_spawn = creature
+			break
+	_require(den_spawn != null, "monster den should spawn an ordered monster")
+	if den_spawn != null:
+		_require(den_spawn.den_order == "guard_heart", "spawned monsters should inherit their den's order")
+		_require(den_spawn.command_target == heart, "guard Heart order should point spawned monsters at the Heart")
+	main.free()
+
+func _test_monsters_avoid_ending_on_the_same_tile() -> void:
+	var grid = GridScript.new()
+	var resources = ResourcesScript.new()
+	grid.call("generate_planning_map")
+	var start: Vector2i = grid.entrance_tile + Vector2i.RIGHT
+	var target: Vector2i = start + Vector2i.RIGHT
+	var side: Vector2i = start + Vector2i.DOWN
+	for coord in [target, side]:
+		grid.call("dig", coord)
+	var first = CreatureScript.new()
+	var second = CreatureScript.new()
+	first.call("initialize", "goblin", start)
+	second.call("initialize", "goblin", start)
+	first.command_target = target
+	first.den_order = "guard_room"
+	second.command_target = target
+	second.den_order = "guard_room"
+	first.call("simulate_step", grid, [first, second], [], resources)
+	second.call("simulate_step", grid, [first, second], [], resources)
+	_require(first.tile_pos != second.tile_pos, "monsters should avoid ending a step stacked on the same tile")
+	first.free()
+	second.free()
+	resources.free()
 	grid.free()
 
 func _test_live_heart_can_be_moved_for_essence() -> void:
@@ -717,6 +1261,9 @@ func _test_monster_den_spawns_by_environment() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
 	await process_frame
+	main.resources.set_amount("knowledge", 200)
+	for upgrade_id in ["dungeon_praxis", "dungeon_praxis", "hexbound_kin", "ember_pact"]:
+		main.call("_buy_research_upgrade", upgrade_id)
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
 	var den = heart + Vector2i.RIGHT
 	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
@@ -759,6 +1306,27 @@ func _test_heart_larva_spawns_and_stays_near_heart() -> void:
 	_require(larva.tile_pos.distance_to(heart) <= 2.0, "boss larva should stay close to the Heart instead of chasing crawlers")
 	far_crawler.free()
 	main.free()
+
+func _test_boss_patrols_near_heart_without_roaming() -> void:
+	var grid = GridScript.new()
+	var resources = ResourcesScript.new()
+	grid.call("generate_planning_map")
+	var heart = grid.entrance_tile + Vector2i.RIGHT
+	grid.call("place_structure", heart, "heart")
+	for x in range(heart.x - 4, heart.x + 5):
+		for y in range(heart.y - 4, heart.y + 5):
+			grid.call("dig", Vector2i(x, y))
+	var larva = CreatureScript.new()
+	larva.call("initialize", "heart_larva", heart + Vector2i.RIGHT)
+	var visited := {}
+	for i in range(18):
+		larva.call("simulate_step", grid, [larva], [], resources)
+		visited[larva.tile_pos] = true
+		_require(larva.tile_pos.distance_to(heart) <= 4.0, "boss idle patrol should stay within four tiles of the Heart")
+	_require(visited.size() > 1, "boss should patrol around the Heart when no crawler is nearby")
+	larva.free()
+	resources.free()
+	grid.free()
 
 func _test_boss_larva_is_sturdier_and_hits_harder() -> void:
 	var grid = GridScript.new()
@@ -828,6 +1396,55 @@ func _test_direct_mite_spam_cost_increases() -> void:
 	main.call("_handle_click", tile_b)
 	var second_cost: int = before_second - main.resources.get_amount("biomass")
 	_require(second_cost > first_cost, "direct carrion mite seeding should get more expensive as mite count rises")
+	main.free()
+
+func _test_special_actions_spawn_cloud_field_and_heal() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var heart = main.grid.entrance_tile + Vector2i.RIGHT
+	var center = heart + Vector2i.RIGHT
+	var crawler_coord = center + Vector2i.RIGHT
+	for coord in [heart, center, crawler_coord, center + Vector2i.DOWN]:
+		main.selected_tool = "dig"
+		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	main.call("_start_dungeon")
+	main.resources.set_amount("essence", 200)
+	main.resources.set_amount("biomass", 200)
+	main.resources.set_amount("magic", 200)
+	main.creatures.clear()
+	var spawned_count_before: int = main.creatures.size()
+	main.selected_tool = "spawn_carrion_mite"
+	main.call("_handle_click", center)
+	_require(main.creatures.size() > spawned_count_before, "Special spawn carrion mite should immediately create a mite")
+	var crawler = AdventurerScript.new()
+	main.grid.add_child(crawler)
+	crawler.call("initialize", "looter", crawler_coord, heart)
+	main.adventurers.append(crawler)
+	main.selected_tool = "poison_cloud"
+	main.call("_handle_click", crawler_coord)
+	_require(main.grid.get_tile(crawler_coord).poison_cloud_ticks > 0, "poison cloud should mark a temporary 3x3 poison field")
+	var hp_before_poison: float = crawler.hp
+	main.call("_apply_temporary_tile_effects")
+	_require(crawler.hp < hp_before_poison, "poison cloud should damage crawlers over time")
+	var mite = main.creatures[0]
+	var attack_before: float = mite.attack_damage()
+	main.selected_tool = "magic_field"
+	main.call("_handle_click", mite.tile_pos)
+	_require(main.grid.get_tile(mite.tile_pos).magic_field_ticks > 0, "magic field should mark a temporary 3x3 magic field")
+	main.call("_apply_temporary_tile_effects")
+	_require(mite.attack_damage() > attack_before, "magic field should strengthen monsters standing in it")
+	mite.hp = 1.0
+	main.selected_tool = "heal"
+	main.call("_handle_click", mite.tile_pos)
+	_require(mite.hp > 1.0, "heal should restore damaged monsters")
+	var heart_tile: DungeonTileData = main.grid.get_tile(heart)
+	heart_tile.heart_hp = 20
+	main.selected_tool = "heal"
+	main.call("_handle_click", heart)
+	_require(heart_tile.heart_hp > 20, "heal should restore the dungeon Heart")
 	main.free()
 
 func _test_exploding_spores_damage_crawlers_and_break_walls() -> void:
@@ -1129,6 +1746,33 @@ func _test_crawler_does_not_farm_knowledge_each_magic_step() -> void:
 		adventurer.call("simulate_step", grid, [], resources)
 	_require(resources.get_amount("knowledge") <= 1, "crawlers should not generate knowledge every step while walking through ambient magic")
 	adventurer.free()
+	resources.free()
+	grid.free()
+
+func _test_looted_spoils_require_research() -> void:
+	var grid = GridScript.new()
+	var resources = ResourcesScript.new()
+	grid.call("generate_planning_map")
+	var trap: Vector2i = grid.entrance_tile + Vector2i.RIGHT
+	grid.call("place_structure", trap, "trap")
+	grid.get_tile(trap).trap_damage = 99
+	var crawler = AdventurerScript.new()
+	crawler.call("initialize", "looter", trap, trap)
+	crawler.looted_essence = 5
+	var essence_before: int = resources.get_amount("essence")
+	crawler.call("simulate_step", grid, [], resources)
+	_require(resources.get_amount("essence") == essence_before + 1, "dead crawlers should not return stolen essence before Claimed Spoils is researched")
+	crawler.free()
+	resources.call("set_looted_spoils_rank", 2)
+	grid.call("place_structure", trap, "trap")
+	grid.get_tile(trap).trap_damage = 99
+	var second = AdventurerScript.new()
+	second.call("initialize", "looter", trap, trap)
+	second.looted_essence = 5
+	essence_before = resources.get_amount("essence")
+	second.call("simulate_step", grid, [], resources)
+	_require(resources.get_amount("essence") == essence_before + 6, "Claimed Spoils should allow dead crawlers to return stolen essence")
+	second.free()
 	resources.free()
 	grid.free()
 

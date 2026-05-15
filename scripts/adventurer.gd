@@ -16,7 +16,12 @@ var target: Vector2i = Vector2i.ZERO
 var debug_path: Array[Vector2i] = []
 var is_attacking: bool = false
 var door_delay: int = 0
+var poison_ticks: int = 0
+var poison_damage_per_tick: float = 0.0
+var looted_essence: int = 0
+var secret_tunnel_discover_chance: float = 0.04
 var explored_doors: Dictionary = {}
+var discovered_secret_tunnels: Dictionary = {}
 var previous_tile_pos: Vector2i = Vector2i(-1, -1)
 var committed_door_target: Vector2i = Vector2i(-1, -1)
 var dwarf_run_frames: Array[Texture2D] = []
@@ -77,6 +82,13 @@ func _load_texture(path: String) -> Texture2D:
 func simulate_step(grid: DungeonGrid, creatures: Array, resources: DungeonResources) -> void:
 	is_attacking = false
 	var tile: DungeonTileData = grid.get_tile(tile_pos)
+	if poison_ticks > 0:
+		hp -= poison_damage_per_tick
+		poison_ticks -= 1
+		log_event.emit("%s suffers poison." % role.capitalize())
+		if hp <= 0.0:
+			_die(tile, resources)
+			return
 	if tile.structure == "trap":
 		hp -= tile.trap_damage
 		grid.clear_structure(tile_pos)
@@ -84,6 +96,24 @@ func simulate_step(grid: DungeonGrid, creatures: Array, resources: DungeonResour
 		if hp <= 0.0:
 			_die(tile, resources)
 			return
+	if tile.structure == "poison_trap":
+		poison_ticks = max(poison_ticks, tile.poison_duration)
+		poison_damage_per_tick = max(poison_damage_per_tick, float(tile.poison_damage))
+		log_event.emit("%s is poisoned by a trap." % role.capitalize())
+	if tile.secret_tunnel and not discovered_secret_tunnels.has(tile_pos) and randf() < secret_tunnel_discover_chance:
+		discovered_secret_tunnels[tile_pos] = true
+		log_event.emit("%s discovers a secret tunnel." % role.capitalize())
+	if tile.structure == "door" and tile.locked_door and tile.door_hp > 0:
+		is_attacking = true
+		tile.door_hp -= int(ceil(attack_damage()))
+		log_event.emit("%s hacks at a locked door. Door HP: %s." % [role.capitalize(), tile.door_hp])
+		if tile.door_hp <= 0:
+			tile.locked_door = false
+			tile.structure = ""
+			explored_doors[tile_pos] = true
+			log_event.emit("%s breaks down a locked door." % role.capitalize())
+		debug_path = []
+		return
 	if tile.structure == "door" and door_delay <= 0:
 		explored_doors[tile_pos] = true
 		if committed_door_target == tile_pos:
@@ -104,7 +134,8 @@ func simulate_step(grid: DungeonGrid, creatures: Array, resources: DungeonResour
 		return
 	nerve -= _nearby_fear(creatures) * 0.45
 	if tile.structure == "treasure":
-		resources.spend("essence", 1)
+		if resources.spend("essence", 1):
+			looted_essence += 1
 		grid.clear_structure(tile_pos)
 		log_event.emit("%s looted treasure and stole 1 essence." % role.capitalize())
 	if tile.magic_source or tile.heat_source or tile.moisture_source:
@@ -247,6 +278,10 @@ func _die(tile: DungeonTileData, resources: DungeonResources) -> void:
 	resources.add("biomass", 3)
 	resources.add("essence", 1)
 	resources.add("magic", 1)
+	var recovered_loot := resources.recovered_looted_essence(looted_essence)
+	if recovered_loot > 0:
+		resources.add("essence", recovered_loot)
+		log_event.emit("The dungeon recovers %s stolen essence from a dead crawler." % recovered_loot)
 	tile.corpse_mass += 15.0
 	log_event.emit("A %s dies in the dungeon." % role)
 	queue_free()
@@ -295,7 +330,7 @@ func _step_toward(grid: DungeonGrid, destination: Vector2i) -> Vector2i:
 		var exit := _door_exit_neighbor(grid)
 		if exit != Vector2i(-1, -1):
 			return exit
-	var path := grid.find_path(tile_pos, destination)
+	var path := grid.find_path_for_crawler(tile_pos, destination, discovered_secret_tunnels)
 	if path.size() >= 2:
 		return path[1]
 	return tile_pos
@@ -379,3 +414,32 @@ func _draw_debug_path() -> void:
 
 func _tile_to_local(coord: Vector2i) -> Vector2:
 	return Vector2(coord.x * TILE_SIZE + TILE_SIZE * 0.5, coord.y * TILE_SIZE + TILE_SIZE * 0.5) - position
+
+func attack_damage() -> float:
+	if role == "hunter":
+		return 4.0
+	return 2.5
+
+func heart_damage() -> float:
+	return 4.0
+
+func intent_summary() -> String:
+	match role:
+		"looter":
+			return "seeks treasure, then the Heart"
+		"torchbearer":
+			return "burns fungus and disrupts sources"
+		"hunter":
+			return "hunts dungeon creatures"
+	return "explores the dungeon"
+
+func status_summary() -> String:
+	if is_attacking:
+		return "attacking"
+	if door_delay > 0:
+		return "forcing a door"
+	if committed_door_target != Vector2i(-1, -1):
+		return "exploring door %s,%s" % [committed_door_target.x, committed_door_target.y]
+	if target != Vector2i(-1, -1):
+		return "moving toward target"
+	return "searching"

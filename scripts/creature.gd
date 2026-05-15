@@ -7,11 +7,13 @@ signal log_event(message: String)
 const TILE_SIZE := DungeonGrid.TILE_SIZE
 const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
 const VISUAL_MOVE_SECONDS := 0.34
+const BOSS_PATROL_RADIUS := 4.0
+const BOSS_PATROL_STEP_INTERVAL := 3
 
 var species: String = "carrion_mite"
 var tile_pos: Vector2i = Vector2i.ZERO
 var hp: float = 8.0
-var hunger: float = 25.0
+var max_hp: float = 8.0
 var age: int = 0
 var traits: Array[String] = []
 var mutation_pressure: Dictionary = {}
@@ -23,6 +25,15 @@ var skeleton_run_frames: Array[Texture2D] = []
 var visual_start_position: Vector2 = Vector2.ZERO
 var visual_target_position: Vector2 = Vector2.ZERO
 var visual_move_elapsed: float = VISUAL_MOVE_SECONDS
+var den_id: int = -1
+var den_order: String = ""
+var home_tile: Vector2i = Vector2i(-1, -1)
+var command_target: Vector2i = Vector2i(-1, -1)
+var attack_bonus: float = 0.0
+var magic_field_bonus: float = 0.0
+var magic_field_ticks: int = 0
+var lifesteal_chance: float = 0.0
+var boss_can_evolve: bool = false
 
 var species_data := {
 	"spore_root": {"hp": 12.0, "color": Color(0.35, 1.0, 0.43), "traits": ["producer", "stationary", "fungal"]},
@@ -33,6 +44,7 @@ var species_data := {
 	"oracle_slug": {"hp": 11.0, "color": Color(0.78, 0.38, 1.0), "traits": ["herbivore", "omens", "magic-sense"]},
 	"needle_bat": {"hp": 8.0, "color": Color(0.68, 0.68, 0.78), "traits": ["predator", "hunter"]},
 	"goblin": {"hp": 10.0, "color": Color(0.54, 0.82, 0.38), "traits": ["den-born", "guard"]},
+	"skeleton_servitor": {"hp": 14.0, "color": Color(0.88, 0.84, 0.70), "traits": ["den-born", "bone-bound"]},
 	"hex_goblin": {"hp": 11.0, "color": Color(0.70, 0.36, 1.0), "traits": ["den-born", "hexed"]},
 	"ember_imp": {"hp": 9.0, "color": Color(1.0, 0.34, 0.08), "traits": ["den-born", "heated"]},
 	"bog_mite": {"hp": 13.0, "color": Color(0.32, 0.78, 0.48), "traits": ["den-born", "damp"]},
@@ -49,6 +61,7 @@ func initialize(new_species: String, new_tile_pos: Vector2i) -> void:
 	tile_pos = new_tile_pos
 	var data: Dictionary = species_data.get(species, species_data["carrion_mite"])
 	hp = float(data["hp"])
+	max_hp = hp
 	traits.assign(data["traits"])
 	mutation_pressure.clear()
 	_snap_world_position()
@@ -120,7 +133,7 @@ func _update_visual_position(delta: float) -> void:
 
 func simulate_step(grid: DungeonGrid, all_creatures: Array, adventurers: Array = [], resources: DungeonResources = null) -> void:
 	age += 1
-	hunger = clampf(hunger + 1.1, 0.0, 100.0)
+	_update_temporary_buffs()
 	var tile: DungeonTileData = grid.get_tile(tile_pos)
 	if species.begins_with("heart_"):
 		_boss_step(grid, adventurers)
@@ -138,28 +151,28 @@ func simulate_step(grid: DungeonGrid, all_creatures: Array, adventurers: Array =
 		return
 	if species == "needle_bat":
 		_predator_step(grid, all_creatures, resources)
+	elif _command_step(grid, all_creatures):
+		pass
 	else:
-		_forager_step(grid, resources)
+		_forager_step(grid, all_creatures, resources)
 	_update_mutation(tile)
-	if hunger >= 100.0:
-		hp -= 0.35
 	if hp <= 0.0:
 		tile.corpse_mass += 8.0
-		resources.add("bone", 1)
+		if resources != null:
+			resources.add("bone", 1)
 		queue_free()
 
-func _forager_step(grid: DungeonGrid, resources: DungeonResources) -> void:
+func _forager_step(grid: DungeonGrid, all_creatures: Array, resources: DungeonResources) -> void:
 	move_cooldown -= 1
 	var tile: DungeonTileData = grid.get_tile(tile_pos)
-	if tile.biomass > 3.0 and hunger > 30.0:
+	if tile.biomass > 3.0:
 		var eaten: float = min(tile.biomass, 4.5)
 		tile.biomass -= eaten
-		hunger = max(hunger - eaten * 4.5, 0.0)
-		resources.add("biomass", 1 if eaten > 3.0 and species.begins_with("carrion") else 0)
+		if resources != null:
+			resources.add("biomass", 1 if eaten > 3.0 and species.begins_with("carrion") else 0)
 	if tile.corpse_mass > 1.0 and species.contains("mite"):
 		var corpse_eaten: float = min(tile.corpse_mass, 5.0)
 		tile.corpse_mass -= corpse_eaten
-		hunger = max(hunger - corpse_eaten * 6.0, 0.0)
 	if move_cooldown > 0:
 		return
 	move_cooldown = 2 if species.contains("slug") else 1
@@ -174,39 +187,64 @@ func _forager_step(grid: DungeonGrid, resources: DungeonResources) -> void:
 			var candidate = grid.get_tile(coord)
 			return candidate.corpse_mass * 1.4 + candidate.biomass * 0.35 + randf_range(-8.0, 8.0)
 		)
-	tile_pos = next
-	_update_world_position()
+	_move_to_if_open(grid, next, all_creatures)
 
 func _predator_step(grid: DungeonGrid, all_creatures: Array, resources: DungeonResources) -> void:
 	var prey = _nearest_prey(all_creatures, 8)
 	if prey == null:
-		_wander(grid)
+		_wander(grid, all_creatures)
 		return
 	if tile_pos.distance_to(prey.tile_pos) <= 1.1:
 		prey.hp -= 3.0
-		hunger = max(hunger - 20.0, 0.0)
-		resources.add("fear", 1)
+		if resources != null:
+			resources.add("fear", 1)
 	else:
-		tile_pos = _step_toward(grid, prey.tile_pos)
-		_update_world_position()
+		_move_to_if_open(grid, _step_toward(grid, prey.tile_pos, all_creatures), all_creatures)
 
 func _boss_step(grid: DungeonGrid, adventurers: Array) -> void:
+	if species == "heart_larva" and boss_can_evolve and age >= 180:
+		var evolution_heart := grid.find_structure("heart")
+		_grow_boss(grid, evolution_heart if evolution_heart != Vector2i(-1, -1) else tile_pos)
+		return
 	var heart := grid.find_structure("heart")
 	if heart == Vector2i(-1, -1):
 		return
-	if tile_pos.distance_to(heart) > 2.0:
-		tile_pos = _step_toward(grid, heart)
-		_update_world_position()
+	if tile_pos.distance_to(heart) > BOSS_PATROL_RADIUS:
+		_move_to_if_open(grid, _step_toward(grid, heart, []), [])
 		return
+	var attacked := false
 	for adventurer in adventurers:
 		if not is_instance_valid(adventurer):
 			continue
 		if tile_pos.distance_to(adventurer.tile_pos) <= 1.1 or adventurer.tile_pos == heart:
-			adventurer.hp -= 8.0 if species == "heart_larva" else 14.0
+			adventurer.hp -= attack_damage()
 			log_event.emit("%s pulses against a crawler near the Heart." % species.replace("_", " ").capitalize())
+			attacked = true
 			break
-	if species == "heart_larva" and age >= 180:
-		_grow_boss(grid, heart)
+	if not attacked:
+		_boss_idle_patrol(grid, heart)
+
+func _boss_idle_patrol(grid: DungeonGrid, heart: Vector2i) -> void:
+	if age % BOSS_PATROL_STEP_INTERVAL != 0:
+		return
+	var candidates: Array[Vector2i] = []
+	for neighbor in grid.walkable_neighbors(tile_pos):
+		if neighbor == heart:
+			continue
+		if neighbor.distance_to(heart) <= BOSS_PATROL_RADIUS:
+			candidates.append(neighbor)
+	if candidates.is_empty():
+		if tile_pos.distance_to(heart) > 1.5:
+			_move_to_if_open(grid, _step_toward(grid, heart, []), [])
+		return
+	var current_distance := tile_pos.distance_to(heart)
+	if current_distance > BOSS_PATROL_RADIUS - 1.0:
+		var inward := _step_toward(grid, heart, [])
+		if inward != heart and inward.distance_to(heart) <= BOSS_PATROL_RADIUS:
+			_move_to_if_open(grid, inward, [])
+			return
+	var index := int(age / BOSS_PATROL_STEP_INTERVAL + tile_pos.x + tile_pos.y) % candidates.size()
+	_move_to_if_open(grid, candidates[index], [])
 
 func _grow_boss(grid: DungeonGrid, heart: Vector2i) -> void:
 	_mutate_to("heart_juvenile")
@@ -251,15 +289,15 @@ func _nearest_adventurer(adventurers: Array, radius: int):
 func _defend_against(grid: DungeonGrid, adventurer, resources: DungeonResources) -> void:
 	var distance := tile_pos.distance_to(adventurer.tile_pos)
 	if species == "spore_root" and distance <= 4.0:
-		adventurer.hp -= 1.4
+		adventurer.hp -= attack_damage()
+		_try_lifesteal()
 		log_event.emit("Spore root lashes a crawler with choking spores.")
 	elif distance <= 1.1:
-		adventurer.hp -= 2.2
-		hunger = max(hunger - 8.0, 0.0)
+		adventurer.hp -= attack_damage()
+		_try_lifesteal()
 		log_event.emit("%s bites a crawler." % species.replace("_", " "))
 	else:
-		tile_pos = _step_toward(grid, adventurer.tile_pos)
-		_update_world_position()
+		_move_to_if_open(grid, _step_toward(grid, adventurer.tile_pos, []), [])
 	if adventurer.hp <= 0.0:
 		var tile: DungeonTileData = grid.get_tile(adventurer.tile_pos)
 		tile.corpse_mass += 12.0
@@ -268,8 +306,17 @@ func _defend_against(grid: DungeonGrid, adventurer, resources: DungeonResources)
 			resources.add("biomass", 3)
 			resources.add("essence", 1)
 			resources.add("magic", 1)
+			var looted := int(adventurer.get("looted_essence"))
+			var recovered_loot := resources.recovered_looted_essence(looted)
+			if recovered_loot > 0:
+				resources.add("essence", recovered_loot)
 		log_event.emit("%s killed a crawler." % species.replace("_", " ").capitalize())
 		adventurer.queue_free()
+
+func _try_lifesteal() -> void:
+	if lifesteal_chance > 0.0 and randf() < lifesteal_chance:
+		hp += 1.5
+		log_event.emit("%s drinks vitality from a crawler." % species.replace("_", " ").capitalize())
 
 func _nearest_prey(all_creatures: Array, radius: int):
 	var best = null
@@ -284,19 +331,87 @@ func _nearest_prey(all_creatures: Array, radius: int):
 				best_distance = distance
 	return best
 
-func _wander(grid: DungeonGrid) -> void:
-	var choices := grid.walkable_neighbors(tile_pos)
+func _command_step(grid: DungeonGrid, all_creatures: Array) -> bool:
+	if den_order == "" or species == "spore_root" or species.begins_with("heart_"):
+		return false
+	var target := command_target
+	if den_order == "guard_heart":
+		target = grid.find_structure("heart")
+	if target == Vector2i(-1, -1):
+		target = home_tile
+	if den_order == "research":
+		if home_tile != Vector2i(-1, -1) and tile_pos.distance_to(home_tile) > 1.2:
+			_move_to_if_open(grid, _step_toward(grid, home_tile, all_creatures), all_creatures)
+		elif _is_occupied_by_other_creature(tile_pos, all_creatures):
+			_wander(grid, all_creatures)
+		return true
+	var desired_distance := 2.0
+	if den_order == "ambush_door":
+		desired_distance = 1.0
+	elif den_order == "patrol":
+		desired_distance = 5.0
+	if den_order == "patrol" and home_tile != Vector2i(-1, -1) and tile_pos.distance_to(home_tile) <= desired_distance:
+		_wander(grid, all_creatures)
+		return true
+	if target != Vector2i(-1, -1) and tile_pos.distance_to(target) > desired_distance:
+		_move_to_if_open(grid, _step_toward(grid, target, all_creatures), all_creatures)
+		return true
+	if _is_occupied_by_other_creature(tile_pos, all_creatures):
+		_wander(grid, all_creatures)
+	return true
+
+func _wander(grid: DungeonGrid, all_creatures: Array = []) -> void:
+	var choices := _unoccupied_neighbors(grid, all_creatures)
 	if choices.size() > 0:
 		tile_pos = choices.pick_random()
 		_update_world_position()
 
-func _step_toward(grid: DungeonGrid, target: Vector2i) -> Vector2i:
+func _step_toward(grid: DungeonGrid, target: Vector2i, all_creatures: Array = []) -> Vector2i:
 	var path := grid.find_path(tile_pos, target)
 	if path.size() >= 2:
-		return path[1]
-	return grid.get_best_neighbor(tile_pos, func(coord: Vector2i) -> float:
-		return -coord.distance_to(target)
-	)
+		if not _is_occupied_by_other_creature(path[1], all_creatures):
+			return path[1]
+		return _best_unoccupied_neighbor_toward(grid, target, all_creatures)
+	return _best_unoccupied_neighbor_toward(grid, target, all_creatures)
+
+func _best_unoccupied_neighbor_toward(grid: DungeonGrid, target: Vector2i, all_creatures: Array) -> Vector2i:
+	var choices := _unoccupied_neighbors(grid, all_creatures)
+	if choices.is_empty():
+		return tile_pos
+	var best: Vector2i = choices[0]
+	var best_score := -999999.0
+	for coord in choices:
+		var score := -coord.distance_to(target) + randf_range(-0.05, 0.05)
+		if score > best_score:
+			best = coord
+			best_score = score
+	return best
+
+func _unoccupied_neighbors(grid: DungeonGrid, all_creatures: Array) -> Array[Vector2i]:
+	var choices: Array[Vector2i] = []
+	for coord in grid.walkable_neighbors(tile_pos):
+		if not _is_occupied_by_other_creature(coord, all_creatures):
+			choices.append(coord)
+	return choices
+
+func _move_to_if_open(grid: DungeonGrid, next: Vector2i, all_creatures: Array) -> void:
+	if next == tile_pos:
+		if _is_occupied_by_other_creature(tile_pos, all_creatures):
+			_wander(grid, all_creatures)
+		return
+	if grid.is_in_bounds(next) and grid.get_tile(next).is_walkable() and not _is_occupied_by_other_creature(next, all_creatures):
+		tile_pos = next
+		_update_world_position()
+	elif _is_occupied_by_other_creature(tile_pos, all_creatures):
+		_wander(grid, all_creatures)
+
+func _is_occupied_by_other_creature(coord: Vector2i, all_creatures: Array) -> bool:
+	for other in all_creatures:
+		if other == self or not is_instance_valid(other) or other.is_queued_for_deletion():
+			continue
+		if other.tile_pos == coord:
+			return true
+	return false
 
 func _update_mutation(tile: DungeonTileData) -> void:
 	if species == "carrion_mite":
@@ -330,6 +445,53 @@ func mutation_summary() -> String:
 		parts.append("%s %.0f%%" % [key, mutation_pressure[key]])
 	return ", ".join(parts)
 
+func attack_damage() -> float:
+	var base_damage := 0.0
+	if species == "spore_root":
+		base_damage = 1.4
+	elif species == "needle_bat":
+		base_damage = 3.0
+	elif species == "heart_larva":
+		base_damage = 8.0
+	elif species == "heart_juvenile":
+		base_damage = 14.0
+	elif species in ["goblin", "skeleton_servitor", "hex_goblin", "ember_imp", "bog_mite", "cinder_witch"]:
+		base_damage = 2.2
+	elif species.contains("mite"):
+		base_damage = 2.2
+	return base_damage + attack_bonus + magic_field_bonus
+
+func apply_magic_field_bonus(ticks: int = 4, bonus: float = 2.0) -> void:
+	magic_field_ticks = max(magic_field_ticks, ticks)
+	magic_field_bonus = max(magic_field_bonus, bonus)
+	if not traits.has("magic-field"):
+		traits.append("magic-field")
+
+func _update_temporary_buffs() -> void:
+	if magic_field_ticks <= 0:
+		return
+	magic_field_ticks -= 1
+	if magic_field_ticks <= 0:
+		magic_field_bonus = 0.0
+		traits.erase("magic-field")
+
+func status_summary() -> String:
+	if species.begins_with("heart_"):
+		return "bound to Heart"
+	if species == "spore_root":
+		return "rooted producer"
+	if den_order == "research":
+		return "researching"
+	if den_order != "":
+		return den_order.replace("_", " ")
+	if species == "needle_bat":
+		return "hunting prey"
+	if species.contains("slug"):
+		return "grazing damp dark tiles"
+	if species.contains("mite"):
+		return "scavenging biomass and corpses"
+	return "wandering"
+
 func _draw() -> void:
 	_ensure_sprite_frames_loaded()
 	var data: Dictionary = species_data.get(species, species_data["carrion_mite"])
@@ -344,6 +506,9 @@ func _draw() -> void:
 	elif species == "goblin" and goblin_run_frames.size() == 4:
 		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % goblin_run_frames.size()
 		draw_texture_rect(goblin_run_frames[frame], Rect2(Vector2(-13, -18 + bob), Vector2(26, 26)), false)
+	elif species == "skeleton_servitor" and skeleton_run_frames.size() == 4:
+		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % skeleton_run_frames.size()
+		draw_texture_rect(skeleton_run_frames[frame], Rect2(Vector2(-12, -17 + bob), Vector2(24, 24)), false)
 	elif species == "hex_goblin" and goblin_run_frames.size() == 4:
 		var frame := int(floor(anim_time * 8.0 + tile_pos.x + tile_pos.y)) % goblin_run_frames.size()
 		draw_texture_rect(goblin_run_frames[frame], Rect2(Vector2(-13, -18 + bob), Vector2(26, 26)), false, Color(0.86, 0.58, 1.0, 1.0))
