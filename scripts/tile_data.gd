@@ -35,6 +35,8 @@ var den_research_progress: int = 0
 var den_kind: String = "goblin"
 var den_order: String = "guard_room"
 var den_target: Vector2i = Vector2i(-1, -1)
+var prefab_room_id: int = -1
+var prefab_room_kind: String = ""
 var poison_cloud_ticks: int = 0
 var poison_cloud_damage: float = 0.0
 var magic_field_ticks: int = 0
@@ -116,6 +118,8 @@ func set_stone() -> void:
 	den_kind = "goblin"
 	den_order = "guard_room"
 	den_target = Vector2i(-1, -1)
+	prefab_room_id = -1
+	prefab_room_kind = ""
 	planning_floor_cost = 0
 	planning_structure_cost = 0
 	heat_source = false
@@ -154,6 +158,8 @@ func snapshot() -> Dictionary:
 		"den_kind": den_kind,
 		"den_order": den_order,
 		"den_target": den_target,
+		"prefab_room_id": prefab_room_id,
+		"prefab_room_kind": prefab_room_kind,
 		"poison_cloud_ticks": poison_cloud_ticks,
 		"poison_cloud_damage": poison_cloud_damage,
 		"magic_field_ticks": magic_field_ticks,
@@ -188,6 +194,8 @@ func restore(snapshot_data: Dictionary) -> void:
 	den_kind = String(snapshot_data.get("den_kind", "goblin"))
 	den_order = String(snapshot_data.get("den_order", "guard_room"))
 	den_target = snapshot_data.get("den_target", Vector2i(-1, -1))
+	prefab_room_id = int(snapshot_data.get("prefab_room_id", -1))
+	prefab_room_kind = String(snapshot_data.get("prefab_room_kind", ""))
 	poison_cloud_ticks = int(snapshot_data.get("poison_cloud_ticks", 0))
 	poison_cloud_damage = float(snapshot_data.get("poison_cloud_damage", 0.0))
 	magic_field_ticks = int(snapshot_data.get("magic_field_ticks", 0))

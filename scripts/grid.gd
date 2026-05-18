@@ -10,7 +10,10 @@ const CHUNK_SIZE: int = 32
 const CHUNKS_PER_AXIS: int = 4
 const TILE_SIZE: int = 32
 const TILESET_ROOT := "res://assets/tilesets/0x72_DungeonTilesetII_v1.7"
+const ACTION_ICON_ATLAS := "res://assets/ui/action_icons.png"
 const ATLAS_TILE_SIZE: int = 16
+const ACTION_ICON_SIZE: int = 64
+const HEART_ICON_INDEX: int = 4
 const TILEMAP_LAYER_SCALE := Vector2(float(TILE_SIZE) / float(ATLAS_TILE_SIZE), float(TILE_SIZE) / float(ATLAS_TILE_SIZE))
 const FLOOR_REGIONS := [
 	Rect2(0, 0, 16, 16),
@@ -68,6 +71,8 @@ const WALL_SPRITE_NAMES := [
 	"wall_outer_front_left", "wall_outer_front_right", "wall_outer_mid_left", "wall_outer_mid_right",
 	"wall_outer_top_left", "wall_outer_top_right",
 ]
+const DEN_ROOM_DEPTH: int = 3
+const DEN_ROOM_HALF_WIDTH: int = 1
 
 var tiles: Array = []
 var overlay_mode: String = "normal"
@@ -82,6 +87,7 @@ var dungeon_floor_tileset: Texture2D
 var dungeon_wall_tileset: Texture2D
 var dungeon_door_texture: Texture2D
 var dungeon_treasure_texture: Texture2D
+var action_icon_atlas: Texture2D
 var dungeon_floor_textures: Array[Texture2D] = []
 var dungeon_spike_textures: Array[Texture2D] = []
 var dungeon_wall_textures: Dictionary = {}
@@ -98,6 +104,8 @@ var tilemap_batch_depth: int = 0
 var tilemap_batched_full_refresh: bool = false
 var tilemap_batched_chunks: Dictionary = {}
 var drag_preview_tiles: Dictionary = {}
+var placement_preview_tiles: Dictionary = {}
+var placement_preview_valid: bool = true
 
 func _ready() -> void:
 	_ensure_tilesets_loaded()
@@ -107,12 +115,13 @@ func _ready() -> void:
 		ensure_preview_generated()
 
 func _ensure_tilesets_loaded() -> void:
-	if dungeon_floor_tileset != null and dungeon_wall_tileset != null and dungeon_door_texture != null and dungeon_treasure_texture != null and dungeon_floor_textures.size() == 8 and dungeon_spike_textures.size() == 4 and dungeon_wall_textures.size() == WALL_SPRITE_NAMES.size():
+	if dungeon_floor_tileset != null and dungeon_wall_tileset != null and dungeon_door_texture != null and dungeon_treasure_texture != null and action_icon_atlas != null and dungeon_floor_textures.size() == 8 and dungeon_spike_textures.size() == 4 and dungeon_wall_textures.size() == WALL_SPRITE_NAMES.size():
 		return
 	dungeon_floor_tileset = _load_texture("%s/atlas_floor-16x16.png" % TILESET_ROOT)
 	dungeon_wall_tileset = _load_texture("%s/atlas_walls_low-16x16.png" % TILESET_ROOT)
 	dungeon_door_texture = _load_texture("%s/frames/doors_leaf_closed.png" % TILESET_ROOT)
 	dungeon_treasure_texture = _load_texture("%s/frames/chest_full_open_anim_f0.png" % TILESET_ROOT)
+	action_icon_atlas = _load_texture(ACTION_ICON_ATLAS)
 	if dungeon_floor_textures.is_empty():
 		for floor_index in range(1, 9):
 			dungeon_floor_textures.append(_load_texture("%s/frames/floor_%s.png" % [TILESET_ROOT, floor_index]))
@@ -352,6 +361,26 @@ func clear_drag_preview_tiles() -> void:
 	drag_preview_tiles.clear()
 	queue_redraw()
 
+func set_placement_preview_tiles(coords: Array[Vector2i], valid: bool = true) -> void:
+	placement_preview_tiles.clear()
+	placement_preview_valid = valid
+	for coord in coords:
+		if is_in_bounds(coord):
+			placement_preview_tiles[coord] = true
+	queue_redraw()
+
+func clear_placement_preview_tiles() -> void:
+	if placement_preview_tiles.is_empty():
+		return
+	placement_preview_tiles.clear()
+	queue_redraw()
+
+func placement_preview_coords() -> Array[Vector2i]:
+	var coords: Array[Vector2i] = []
+	for coord in placement_preview_tiles.keys():
+		coords.append(coord)
+	return coords
+
 func chunk_for_coord(coord: Vector2i) -> Vector2i:
 	return Vector2i(floori(float(coord.x) / float(CHUNK_SIZE)), floori(float(coord.y) / float(CHUNK_SIZE)))
 
@@ -546,6 +575,8 @@ func dig(coord: Vector2i) -> bool:
 	var tile: DungeonTileData = get_tile(coord)
 	if not tile.is_diggable():
 		return false
+	if would_expand_prefab_room(coord):
+		return false
 	tile.set_floor()
 	for neighbor in get_cardinal_neighbors(coord):
 		if is_in_bounds(neighbor) and get_tile(neighbor).kind == DungeonTileScript.Kind.WALL:
@@ -559,9 +590,10 @@ func fill(coord: Vector2i) -> bool:
 	var tile: DungeonTileData = get_tile(coord)
 	if tile.kind != DungeonTileScript.Kind.FLOOR:
 		return false
-	if tile.structure != "" or tile.secret_tunnel:
-		clear_structure(coord)
-		return true
+	if tile.prefab_room_id != -1:
+		return false
+	if tile.structure != "" or tile.secret_tunnel or tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed:
+		return false
 	tile.set_stone()
 	_mark_tilemap_layers_dirty(coord)
 	return true
@@ -592,28 +624,31 @@ func place_structure(coord: Vector2i, structure_name: String) -> bool:
 	queue_redraw()
 	return true
 
-func can_place_monster_den(anchor: Vector2i) -> bool:
-	for offset in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.RIGHT + Vector2i.DOWN]:
-		var coord: Vector2i = anchor + offset
-		if not is_in_bounds(coord):
-			return false
-		if not is_in_unlocked_chunk(coord):
-			return false
-		var tile: DungeonTileData = get_tile(coord)
-		if not tile.is_walkable() or tile.kind == DungeonTileScript.Kind.ENTRANCE:
-			return false
-		if tile.structure != "" or tile.den_id != -1 or tile.secret_tunnel:
-			return false
-	return true
+func can_place_monster_den(connector: Vector2i) -> bool:
+	return not monster_den_room_tiles(connector).is_empty()
 
-func place_monster_den(anchor: Vector2i, den_kind: String = "goblin") -> bool:
-	if not can_place_monster_den(anchor):
+func place_monster_den(connector: Vector2i, den_kind: String = "goblin") -> bool:
+	var floor_tiles := monster_den_room_tiles(connector)
+	if floor_tiles.is_empty():
 		return false
+	var direction := _den_room_direction(connector)
+	var anchor := monster_den_room_anchor(connector)
 	var den_id := next_den_id
 	next_den_id += 1
-	for offset in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.RIGHT + Vector2i.DOWN]:
+	begin_tilemap_batch()
+	for coord in floor_tiles:
+		var tile: DungeonTileData = get_tile(coord)
+		tile.set_floor()
+		tile.darkness = max(tile.darkness, 92.0)
+		tile.prefab_room_id = den_id
+		tile.prefab_room_kind = "monster_den"
+		_mark_tilemap_layers_dirty(coord)
+	var den_offsets := _den_footprint_offsets(direction)
+	for offset in den_offsets:
 		var coord: Vector2i = anchor + offset
 		var tile: DungeonTileData = get_tile(coord)
+		tile.prefab_room_id = den_id
+		tile.prefab_room_kind = "monster_den"
 		tile.structure = "monster_den"
 		tile.den_id = den_id
 		tile.den_anchor = offset == Vector2i.ZERO
@@ -622,11 +657,88 @@ func place_monster_den(anchor: Vector2i, den_kind: String = "goblin") -> bool:
 		tile.den_kind = den_kind
 		tile.den_order = "guard_room"
 		tile.den_target = room_center_tile(anchor)
-	queue_redraw()
+	end_tilemap_batch()
 	return true
 
 func place_carrion_den(anchor: Vector2i) -> bool:
 	return place_monster_den(anchor, "carrion")
+
+func monster_den_room_anchor(connector: Vector2i) -> Vector2i:
+	var direction := _den_room_direction(connector)
+	if direction == Vector2i.ZERO:
+		return Vector2i(-1, -1)
+	return connector + direction
+
+func monster_den_room_tiles(connector: Vector2i) -> Array[Vector2i]:
+	var direction := _den_room_direction(connector)
+	if direction == Vector2i.ZERO:
+		return []
+	var anchor := connector + direction
+	var perpendicular := Vector2i(-direction.y, direction.x)
+	var result: Array[Vector2i] = [connector]
+	for depth in range(DEN_ROOM_DEPTH):
+		for width in range(-DEN_ROOM_HALF_WIDTH, DEN_ROOM_HALF_WIDTH + 1):
+			result.append(anchor + direction * depth + perpendicular * width)
+	for side in [-1, 1]:
+		result.append(anchor + direction + perpendicular * side * 2)
+	var seen := {}
+	var unique: Array[Vector2i] = []
+	for coord in result:
+		if seen.has(coord):
+			continue
+		seen[coord] = true
+		if not _can_claim_den_room_tile(coord, connector):
+			return []
+		unique.append(coord)
+	for den_coord in _den_footprint_tiles(connector):
+		if den_coord == Vector2i(-1, -1):
+			return []
+		if not unique.has(den_coord):
+			return []
+	return unique
+
+func _den_room_direction(connector: Vector2i) -> Vector2i:
+	if not is_in_bounds(connector) or not is_in_unlocked_chunk(connector):
+		return Vector2i.ZERO
+	var connector_tile: DungeonTileData = get_tile(connector)
+	if connector_tile.structure != "" or connector_tile.den_id != -1 or connector_tile.secret_tunnel:
+		return Vector2i.ZERO
+	if not connector_tile.is_diggable():
+		return Vector2i.ZERO
+	var adjacent_floors: Array[Vector2i] = []
+	for neighbor in get_cardinal_neighbors(connector):
+		if is_in_bounds(neighbor) and get_tile(neighbor).is_walkable():
+			adjacent_floors.append(neighbor)
+	for floor_coord in adjacent_floors:
+		var direction := connector - floor_coord
+		var anchor := connector + direction
+		if is_in_bounds(anchor) and is_in_unlocked_chunk(anchor) and get_tile(anchor).is_diggable():
+			return direction
+	return Vector2i.ZERO
+
+func _can_claim_den_room_tile(coord: Vector2i, connector: Vector2i) -> bool:
+	if not is_in_bounds(coord) or not is_in_unlocked_chunk(coord):
+		return false
+	var tile: DungeonTileData = get_tile(coord)
+	if coord == connector:
+		return tile.is_diggable() and tile.structure == "" and tile.den_id == -1 and tile.prefab_room_id == -1 and not tile.secret_tunnel
+	if not tile.is_diggable():
+		return false
+	return tile.structure == "" and tile.den_id == -1 and tile.prefab_room_id == -1 and not tile.secret_tunnel
+
+func _den_footprint_tiles(connector: Vector2i) -> Array[Vector2i]:
+	var direction := _den_room_direction(connector)
+	if direction == Vector2i.ZERO:
+		return []
+	var anchor := connector + direction
+	var result: Array[Vector2i] = []
+	for offset in _den_footprint_offsets(direction):
+		result.append(anchor + offset)
+	return result
+
+func _den_footprint_offsets(direction: Vector2i) -> Array[Vector2i]:
+	var perpendicular := Vector2i(-direction.y, direction.x)
+	return [Vector2i.ZERO, perpendicular, direction, direction + perpendicular]
 
 func clear_structure(coord: Vector2i) -> bool:
 	if not is_in_bounds(coord):
@@ -654,7 +766,43 @@ func clear_monster_den(den_id: int) -> void:
 				tile.den_kind = "goblin"
 				tile.den_order = "guard_room"
 				tile.den_target = Vector2i(-1, -1)
+			if tile.prefab_room_id == den_id:
+				tile.prefab_room_id = -1
+				tile.prefab_room_kind = ""
 	queue_redraw()
+
+func prefab_room_tiles(prefab_id: int) -> Array[Vector2i]:
+	var coords: Array[Vector2i] = []
+	if prefab_id == -1:
+		return coords
+	for x in range(GRID_SIZE):
+		for y in range(GRID_SIZE):
+			var coord := Vector2i(x, y)
+			if get_tile(coord).prefab_room_id == prefab_id:
+				coords.append(coord)
+	return coords
+
+func remove_prefab_room(prefab_id: int) -> bool:
+	var coords := prefab_room_tiles(prefab_id)
+	if coords.is_empty():
+		return false
+	begin_tilemap_batch()
+	for coord in coords:
+		get_tile(coord).set_stone()
+		_mark_tilemap_layers_dirty(coord)
+	end_tilemap_batch()
+	return true
+
+func would_expand_prefab_room(coord: Vector2i) -> bool:
+	if not is_in_bounds(coord):
+		return false
+	var tile: DungeonTileData = get_tile(coord)
+	if not tile.is_diggable():
+		return false
+	for neighbor in get_cardinal_neighbors(coord):
+		if is_in_bounds(neighbor) and get_tile(neighbor).prefab_room_id != -1:
+			return true
+	return false
 
 func den_anchors() -> Array[Vector2i]:
 	var anchors: Array[Vector2i] = []
@@ -969,6 +1117,8 @@ func _process(delta: float) -> void:
 		queue_redraw()
 	if overlay_mode == "heat" or overlay_mode == "magic":
 		queue_redraw()
+	elif find_structure("heart") != Vector2i(-1, -1):
+		queue_redraw()
 
 func _draw() -> void:
 	if tiles.is_empty():
@@ -996,7 +1146,8 @@ func _draw() -> void:
 				_draw_tile_effects(coord, rect)
 	_draw_chunk_influence_overlays()
 	_draw_drag_preview_tiles()
-	if is_in_bounds(hovered_tile):
+	_draw_placement_preview_tiles()
+	if placement_preview_tiles.is_empty() and is_in_bounds(hovered_tile):
 		draw_rect(Rect2(hovered_tile.x * TILE_SIZE, hovered_tile.y * TILE_SIZE, TILE_SIZE, TILE_SIZE), Color(0.8, 0.95, 0.75, 0.45), false, 2.0)
 
 func _manual_draw_tile_rects() -> Array[Rect2i]:
@@ -1026,6 +1177,15 @@ func _draw_drag_preview_tiles() -> void:
 			var rect := Rect2(coord.x * TILE_SIZE, coord.y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
 			draw_rect(rect, Color(0.72, 0.92, 0.72, 0.22), true)
 			draw_rect(rect, Color(0.88, 1.0, 0.74, 0.82), false, 2.0)
+
+func _draw_placement_preview_tiles() -> void:
+	var fill_color := Color(0.42, 0.86, 0.62, 0.24) if placement_preview_valid else Color(0.95, 0.22, 0.18, 0.18)
+	var line_color := Color(0.66, 1.0, 0.70, 0.88) if placement_preview_valid else Color(1.0, 0.25, 0.18, 0.82)
+	for coord in placement_preview_tiles.keys():
+		if is_in_bounds(coord):
+			var rect := Rect2(coord.x * TILE_SIZE, coord.y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+			draw_rect(rect, fill_color, true)
+			draw_rect(rect, line_color, false, 2.0)
 
 func _tilemap_covers_base(coord: Vector2i) -> bool:
 	if overlay_mode != "normal":
@@ -1236,8 +1396,7 @@ func _draw_structure(tile: DungeonTileData, center: Vector2) -> void:
 			if tile.den_anchor:
 				draw_circle(center, 4.0 + sin(shimmer_time * 3.0) * 1.0, Color(0.72, 0.96, 0.42, 0.85))
 		"heart":
-			draw_circle(center, 10.0, Color(0.92, 0.08, 0.22, 0.95))
-			draw_circle(center, 5.0 + sin(shimmer_time * 4.0) * 1.2, Color(1.0, 0.36, 0.44, 0.95))
+			_draw_heart_structure(center)
 			if tile.heart_hp < 120:
 				var bar_rect := Rect2(center + Vector2(-14, -22), Vector2(28, 4))
 				var fill_width := 28.0 * clampf(float(tile.heart_hp) / 120.0, 0.0, 1.0)
@@ -1266,3 +1425,26 @@ func _draw_structure(tile: DungeonTileData, center: Vector2) -> void:
 			if tile.locked_door:
 				draw_rect(Rect2(center - Vector2(9, 12), Vector2(18, 22)), Color(0.96, 0.78, 0.34, 0.32), false, 2.0)
 				draw_circle(center + Vector2(0, -2), 3.0, Color(0.95, 0.78, 0.32, 0.9))
+
+func _draw_heart_structure(center: Vector2) -> void:
+	var pulse := (sin(shimmer_time * 2.8) + 1.0) * 0.5
+	var outer_radius := 17.0 + pulse * 3.0
+	var inner_radius := 10.0 + pulse * 1.8
+	draw_circle(center, outer_radius, Color(0.95, 0.08, 0.20, 0.16 + pulse * 0.08))
+	draw_circle(center, inner_radius, Color(1.0, 0.22, 0.36, 0.18))
+	for i in range(3):
+		var angle := shimmer_time * 1.35 + float(i) * TAU / 3.0
+		var mote_pos := center + Vector2(cos(angle), sin(angle)) * (16.0 + pulse * 2.0)
+		draw_circle(mote_pos, 2.0, Color(1.0, 0.42, 0.58, 0.48))
+	if action_icon_atlas != null:
+		var src_rect := _heart_icon_region()
+		draw_texture_rect_region(action_icon_atlas, Rect2(center - Vector2(16, 16), Vector2(32, 32)), src_rect)
+	else:
+		draw_circle(center, 10.0, Color(0.92, 0.08, 0.22, 0.95))
+		draw_circle(center, 5.0 + sin(shimmer_time * 4.0) * 1.2, Color(1.0, 0.36, 0.44, 0.95))
+
+func _heart_icon_region() -> Rect2:
+	return Rect2(
+		Vector2((HEART_ICON_INDEX % 5) * ACTION_ICON_SIZE, int(HEART_ICON_INDEX / 5) * ACTION_ICON_SIZE),
+		Vector2(ACTION_ICON_SIZE, ACTION_ICON_SIZE)
+	)

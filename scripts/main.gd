@@ -37,6 +37,7 @@ const RESEARCH_UPGRADE_DEFS := {
 const BASE_TOOL_COSTS := {
 	"dig": 1,
 	"fill": 1,
+	"remove": 1,
 	"place_heart": 0,
 	"place_treasure": 5,
 	"place_trap": 6,
@@ -107,7 +108,11 @@ func _ready() -> void:
 	simulation.log_event.connect(_log_event)
 	ui.bind_resources(resources)
 	resources.changed.connect(func(_values: Dictionary) -> void: _sync_research_ui())
-	ui.tool_selected.connect(func(tool: String) -> void: selected_tool = tool)
+	grid.hovered_tile_changed.connect(_on_grid_hovered_tile_changed)
+	ui.tool_selected.connect(func(tool: String) -> void:
+		selected_tool = tool
+		_update_placement_preview(grid.hovered_tile)
+	)
 	ui.overlay_selected.connect(func(overlay: String) -> void: grid.set_overlay(overlay))
 	ui.undo_requested.connect(_undo_planning_action)
 	ui.start_requested.connect(_start_dungeon)
@@ -241,7 +246,7 @@ func _handle_click(coord: Vector2i) -> void:
 	if selected_tool == "expand_influence":
 		_expand_influence_at(coord)
 		return
-	if planning_phase and not selected_tool in ["dig", "fill", "place_heart", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "place_monster_den", "place_carrion_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root", "expand_influence", "den_order_guard_heart", "den_order_guard_room", "den_order_patrol", "den_order_ambush_door"]:
+	if planning_phase and not selected_tool in ["dig", "fill", "remove", "place_heart", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "place_monster_den", "place_carrion_den", "move_heart", "moisture_source", "heat_vent", "magic_seep", "seed_spore_root", "expand_influence", "den_order_guard_heart", "den_order_guard_room", "den_order_patrol", "den_order_ambush_door"]:
 		ui.show_message("Natural shaping unlocks after the dungeon starts. Use build tools during planning.")
 		return
 	if not _has_influence_for_tool(coord):
@@ -254,6 +259,8 @@ func _handle_click(coord: Vector2i) -> void:
 				_erase_planning_tile(coord)
 			else:
 				_apply_tile_action(coord, selected_tool, func() -> bool: return _fill_preserving_heart_access(coord))
+		"remove":
+			_remove_at(coord)
 		"place_heart":
 			_apply_tile_action(coord, selected_tool, func() -> bool: return _place_unique_structure(coord, "heart"))
 		"move_heart":
@@ -286,9 +293,9 @@ func _handle_click(coord: Vector2i) -> void:
 				return grid.place_structure(coord, "secret_tunnel")
 			)
 		"place_monster_den":
-			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_monster_den(coord, "goblin"))
+			_apply_den_room_action(coord, selected_tool, "goblin")
 		"place_carrion_den":
-			_apply_tile_action(coord, selected_tool, func() -> bool: return grid.place_carrion_den(coord))
+			_apply_den_room_action(coord, selected_tool, "carrion")
 		"moisture_source":
 			_apply_source_action(coord, selected_tool, func(tile: DungeonTileData) -> void:
 				tile.moisture_source = true
@@ -394,18 +401,36 @@ func _can_preview_drag_tile(coord: Vector2i, tool: String) -> bool:
 	var tile: DungeonTileData = grid.get_tile(coord)
 	match tool:
 		"dig":
-			return tile.is_diggable()
+			return tile.is_diggable() and not grid.would_expand_prefab_room(coord)
 		"fill":
+			if tile.prefab_room_id != -1:
+				return false
 			if planning_phase:
-				return tile.kind != DungeonTileScript.Kind.ENTRANCE and (tile.kind == DungeonTileScript.Kind.FLOOR or tile.structure != "" or tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed)
-			return tile.kind == DungeonTileScript.Kind.FLOOR
+				return _is_plain_fillable_floor(tile)
+			return _is_plain_fillable_floor(tile)
 	return false
+
+func _is_plain_fillable_floor(tile: DungeonTileData) -> bool:
+	return tile.kind == DungeonTileScript.Kind.FLOOR and tile.structure == "" and not tile.secret_tunnel and tile.prefab_room_id == -1 and not tile.heat_source and not tile.moisture_source and not tile.magic_source and not tile.spore_seed
 
 func _sync_drag_preview_to_grid() -> void:
 	var coords: Array[Vector2i] = []
 	for coord in drag_preview_tiles.keys():
 		coords.append(coord)
 	grid.set_drag_preview_tiles(coords)
+
+func _on_grid_hovered_tile_changed(coord: Vector2i) -> void:
+	_update_placement_preview(coord)
+
+func _update_placement_preview(coord: Vector2i) -> void:
+	if not selected_tool in ["place_monster_den", "place_carrion_den"]:
+		grid.clear_placement_preview_tiles()
+		return
+	var floor_tiles := grid.monster_den_room_tiles(coord)
+	if floor_tiles.is_empty():
+		grid.set_placement_preview_tiles([coord], false)
+		return
+	grid.set_placement_preview_tiles(floor_tiles, true)
 
 func _commit_drag_dig(coords: Array[Vector2i]) -> void:
 	var valid: Array[Vector2i] = []
@@ -496,6 +521,31 @@ func _apply_tile_action(coord: Vector2i, tool: String, action: Callable) -> void
 		_update_build_warnings()
 	heart_coord = grid.find_structure("heart")
 
+func _apply_den_room_action(coord: Vector2i, tool: String, den_kind: String) -> void:
+	var affected_tiles := grid.monster_den_room_tiles(coord)
+	if affected_tiles.is_empty():
+		ui.show_message("Attach the den room to a clear dungeon edge.")
+		return
+	var cost: int = int(tool_costs.get(tool, 0))
+	if cost > 0 and not resources.spend("essence", cost):
+		ui.show_message("Need %s essence." % cost)
+		return
+	var anchor := grid.monster_den_room_anchor(coord)
+	var snapshots: Array[Dictionary] = []
+	for affected_coord in affected_tiles:
+		snapshots.append({"coord": affected_coord, "before": grid.get_tile(affected_coord).snapshot()})
+	if not grid.place_monster_den(coord, den_kind):
+		if cost > 0:
+			resources.add("essence", cost)
+		ui.show_message("Attach the den room to a clear dungeon edge.")
+		return
+	if planning_phase:
+		if anchor != Vector2i(-1, -1):
+			grid.get_tile(anchor).planning_structure_cost += cost
+		planning_history.append({"snapshots": snapshots, "cost": cost})
+		_update_build_warnings()
+	heart_coord = grid.find_structure("heart")
+
 func _fail_action(message: String) -> bool:
 	action_failure_message = message
 	return false
@@ -546,15 +596,130 @@ func _fill_preserving_heart_access(coord: Vector2i) -> bool:
 	if not grid.is_in_bounds(coord):
 		return false
 	var tile: DungeonTileData = grid.get_tile(coord)
-	if tile.kind != DungeonTileScript.Kind.FLOOR:
+	if not _is_plain_fillable_floor(tile):
 		return false
-	if tile.structure == "heart":
-		return _fail_action("The Heart cannot be filled in.")
-	if tile.structure != "" or tile.secret_tunnel:
-		return grid.fill(coord)
 	if not _heart_path_survives_blocked_tiles([coord]):
 		return _fail_action("The Heart must remain reachable from the entrance.")
 	return grid.fill(coord)
+
+func _remove_at(coord: Vector2i) -> void:
+	if not grid.is_in_bounds(coord):
+		return
+	if planning_phase:
+		_remove_planning_at(coord)
+		return
+	var cost: int = int(tool_costs.get("remove", 0))
+	if cost > 0 and not resources.spend("essence", cost):
+		ui.show_message("Need %s essence." % cost)
+		return
+	action_failure_message = ""
+	if not _remove_live_at(coord):
+		if cost > 0:
+			resources.add("essence", cost)
+		ui.show_message(action_failure_message if action_failure_message != "" else "Nothing removable there.")
+		return
+	heart_coord = grid.find_structure("heart")
+
+func _remove_live_at(coord: Vector2i) -> bool:
+	var tile: DungeonTileData = grid.get_tile(coord)
+	if tile.kind == DungeonTileScript.Kind.ENTRANCE:
+		return _fail_action("The entrance cannot be removed.")
+	if tile.structure == "heart":
+		return _fail_action("The Heart cannot be removed.")
+	if tile.prefab_room_id != -1:
+		var prefab_tiles := grid.prefab_room_tiles(tile.prefab_room_id)
+		if not _heart_path_survives_blocked_tiles(prefab_tiles):
+			return _fail_action("The Heart must remain reachable from the entrance.")
+		return grid.remove_prefab_room(tile.prefab_room_id)
+	if _remove_tile_feature(tile):
+		grid.call("_mark_tilemap_layers_dirty", coord)
+		grid.queue_redraw()
+		return true
+	if _is_plain_fillable_floor(tile):
+		return _fill_preserving_heart_access(coord)
+	return false
+
+func _remove_planning_at(coord: Vector2i, announce: bool = true, refresh_warnings: bool = true) -> bool:
+	if not grid.is_in_bounds(coord):
+		return false
+	if not grid.is_in_unlocked_chunk(coord):
+		if announce:
+			ui.show_message("Expand influence into that chunk before shaping it.")
+		return false
+	var tile: DungeonTileData = grid.get_tile(coord)
+	if tile.kind == DungeonTileScript.Kind.ENTRANCE:
+		if announce:
+			ui.show_message("The entrance cannot be removed.")
+		return false
+	if tile.structure == "heart":
+		if announce:
+			ui.show_message("The Heart cannot be removed.")
+		return false
+	if tile.prefab_room_id != -1:
+		return _remove_planning_prefab_room(tile.prefab_room_id, announce, refresh_warnings)
+	if tile.structure != "" or tile.secret_tunnel or tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed:
+		var refund: int = tile.planning_structure_cost
+		_remove_tile_feature(tile)
+		tile.planning_structure_cost = 0
+		resources.add("essence", refund)
+		heart_coord = grid.find_structure("heart")
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Removed. Refunded %s essence." % refund)
+		grid.call("_mark_tilemap_layers_dirty", coord)
+		grid.queue_redraw()
+		return true
+	if _is_plain_fillable_floor(tile):
+		if not _heart_path_survives_blocked_tiles([coord]):
+			if announce:
+				ui.show_message("The Heart must remain reachable from the entrance.")
+			return false
+		var floor_refund: int = tile.planning_floor_cost
+		tile.set_stone()
+		resources.add("essence", floor_refund)
+		if refresh_warnings:
+			_update_build_warnings()
+		if announce:
+			ui.show_message("Floor erased. Refunded %s essence." % floor_refund)
+		grid.call("_mark_tilemap_layers_dirty", coord)
+		return true
+	if announce:
+		ui.show_message("Nothing removable there.")
+	return false
+
+func _remove_planning_prefab_room(prefab_id: int, announce: bool = true, refresh_warnings: bool = true) -> bool:
+	var prefab_tiles := grid.prefab_room_tiles(prefab_id)
+	if prefab_tiles.is_empty():
+		return false
+	if not _heart_path_survives_blocked_tiles(prefab_tiles):
+		if announce:
+			ui.show_message("The Heart must remain reachable from the entrance.")
+		return false
+	var refund := 0
+	for coord in prefab_tiles:
+		refund += grid.get_tile(coord).planning_structure_cost
+	if not grid.remove_prefab_room(prefab_id):
+		return false
+	resources.add("essence", refund)
+	if refresh_warnings:
+		_update_build_warnings()
+	if announce:
+		ui.show_message("Prefab room removed. Refunded %s essence." % refund)
+	return true
+
+func _remove_tile_feature(tile: DungeonTileData) -> bool:
+	var removed := false
+	if tile.structure != "" or tile.secret_tunnel:
+		tile.clear_structure_state()
+		removed = true
+	if tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed:
+		tile.heat_source = false
+		tile.moisture_source = false
+		tile.magic_source = false
+		tile.spore_seed = false
+		removed = true
+	return removed
 
 func _apply_source_action(coord: Vector2i, tool: String, mutation: Callable) -> void:
 	if not grid.is_in_bounds(coord):
@@ -582,60 +747,23 @@ func _erase_planning_tile(coord: Vector2i, announce: bool = true, refresh_warnin
 		if announce:
 			ui.show_message("The entrance cannot be erased.")
 		return false
-	if tile.structure == "monster_den":
-		var den_refund := 0
-		for den_tile_coord in grid.den_tiles(tile.den_id):
-			den_refund += grid.get_tile(den_tile_coord).planning_structure_cost
-		grid.clear_monster_den(tile.den_id)
-		resources.add("essence", den_refund)
-		if refresh_warnings:
-			_update_build_warnings()
+	if not _is_plain_fillable_floor(tile):
 		if announce:
-			ui.show_message("Monster den erased. Refunded %s essence." % den_refund)
-		return true
-	if tile.structure != "" or tile.secret_tunnel:
-		var refund: int = tile.planning_structure_cost
-		grid.clear_structure(coord)
-		tile.planning_structure_cost = 0
-		resources.add("essence", refund)
-		heart_coord = grid.find_structure("heart")
-		if refresh_warnings:
-			_update_build_warnings()
+			ui.show_message("Use Remove for structures, sources, tunnels, and prefab rooms.")
+		return false
+	if not _heart_path_survives_blocked_tiles([coord]):
 		if announce:
-			ui.show_message("Structure erased. Refunded %s essence." % refund)
-		grid.queue_redraw()
-		return true
-	if tile.heat_source or tile.moisture_source or tile.magic_source or tile.spore_seed:
-		var source_refund: int = tile.planning_structure_cost
-		tile.heat_source = false
-		tile.moisture_source = false
-		tile.magic_source = false
-		tile.spore_seed = false
-		tile.planning_structure_cost = 0
-		resources.add("essence", source_refund)
-		if refresh_warnings:
-			_update_build_warnings()
-		if announce:
-			ui.show_message("Source erased. Refunded %s essence." % source_refund)
-		grid.queue_redraw()
-		return true
-	if tile.kind == DungeonTileScript.Kind.FLOOR:
-		if not _heart_path_survives_blocked_tiles([coord]):
-			if announce:
-				ui.show_message("The Heart must remain reachable from the entrance.")
-			return false
-		var floor_refund: int = tile.planning_floor_cost
-		tile.set_stone()
-		resources.add("essence", floor_refund)
-		if refresh_warnings:
-			_update_build_warnings()
-		if announce:
-			ui.show_message("Floor erased. Refunded %s essence." % floor_refund)
-		grid.call("_mark_tilemap_layers_dirty", coord)
-		return true
+			ui.show_message("The Heart must remain reachable from the entrance.")
+		return false
+	var floor_refund: int = tile.planning_floor_cost
+	tile.set_stone()
+	resources.add("essence", floor_refund)
+	if refresh_warnings:
+		_update_build_warnings()
 	if announce:
-		ui.show_message("Nothing planned there to erase.")
-	return false
+		ui.show_message("Floor erased. Refunded %s essence." % floor_refund)
+	grid.call("_mark_tilemap_layers_dirty", coord)
+	return true
 
 func _place_unique_structure(coord: Vector2i, structure_name: String) -> bool:
 	if grid.find_structure(structure_name) != Vector2i(-1, -1):
@@ -673,6 +801,16 @@ func _undo_planning_action() -> void:
 		resources.add("essence", int(entry["cost"]))
 		_update_build_warnings()
 		ui.show_message("Influence expansion undone.")
+		return
+	if entry.has("snapshots"):
+		for snapshot_entry in entry["snapshots"]:
+			var snapshot_coord: Vector2i = snapshot_entry["coord"]
+			grid.get_tile(snapshot_coord).restore(snapshot_entry["before"])
+			grid.call("_mark_tilemap_layers_dirty", snapshot_coord)
+		resources.add("essence", int(entry["cost"]))
+		heart_coord = grid.find_structure("heart")
+		_update_build_warnings()
+		ui.show_message("Planning action undone.")
 		return
 	var coord: Vector2i = entry["coord"]
 	grid.get_tile(coord).restore(entry["before"])

@@ -56,6 +56,7 @@ const TOOLS := [
 	"inspect",
 	"dig",
 	"fill",
+	"remove",
 	"place_heart",
 	"place_treasure",
 	"place_trap",
@@ -92,6 +93,7 @@ const TOOL_ICONS := {
 	"inspect": "?",
 	"dig": "D",
 	"fill": "F",
+	"remove": "Rm",
 	"place_heart": "H",
 	"place_treasure": "Tr",
 	"place_trap": "^",
@@ -125,13 +127,14 @@ const OVERLAY_ICONS := {
 const DISPLAY_NAMES := {
 	"place_monster_den": "Goblin Den",
 	"place_carrion_den": "Carrion Den",
+	"remove": "Remove",
 	"spawn_carrion_mite": "Spawn Carrion Mite",
 	"poison_cloud": "Poison Cloud",
 	"magic_field": "Magic Field",
 	"heal": "Heal",
 }
 const TOOL_GROUPS := [
-	{"label": "Buildings", "node": "BuildingsTools", "tools": ["dig", "fill", "expand_influence", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "moisture_source", "heat_vent", "magic_seep"]},
+	{"label": "Buildings", "node": "BuildingsTools", "tools": ["dig", "fill", "remove", "expand_influence", "place_treasure", "place_trap", "place_poison_trap", "place_door", "place_locked_door", "place_secret_tunnel", "moisture_source", "heat_vent", "magic_seep"]},
 	{"label": "Monsters", "node": "MonstersTools", "tools": ["place_heart", "move_heart", "place_monster_den", "place_carrion_den", "seed_spore_root", "respawn_boss"]},
 	{"label": "Special", "node": "SpecialTools", "tools": ["spawn_carrion_mite", "explode_spores", "poison_cloud", "magic_field", "heal"]},
 ]
@@ -146,6 +149,7 @@ const ACTION_ICON_INDEX := {
 	"inspect": 0,
 	"dig": 1,
 	"fill": 2,
+	"remove": 2,
 	"expand_influence": 3,
 	"place_heart": 4,
 	"move_heart": 5,

@@ -42,16 +42,20 @@ func _initialize() -> void:
 	_test_entities_interpolate_between_tile_steps()
 	await _test_heart_must_be_reachable_to_place_start_and_fill()
 	await _test_planning_heart_is_free_and_fill_refunds()
-	await _test_planning_fill_clears_secret_tunnel_without_erasing_floor()
+	await _test_remove_handles_structures_sources_secret_tunnels_and_floors()
 	await _test_structure_clearing_resets_all_tile_state()
 	await _test_build_phase_sources_and_monster_den()
 	await _test_monster_den_requires_clear_2x2()
+	await _test_monster_den_places_attached_prefab_room()
+	await _test_monster_den_hover_previews_full_prefab_room()
+	await _test_prefab_rooms_cannot_be_expanded_or_partially_filled_by_hand()
+	await _test_remove_deletes_whole_prefab_room()
 	await _test_carrion_den_spawns_mites_like_a_den()
 	_test_rooms_treat_doors_as_boundaries()
 	await _test_den_orders_are_assigned_and_inherited()
 	_test_monsters_avoid_ending_on_the_same_tile()
 	await _test_live_heart_can_be_moved_for_essence()
-	await _test_live_fill_removes_door()
+	await _test_live_remove_clears_door_before_floor_fill()
 	await _test_essence_can_seed_emergency_mite()
 	await _test_incursions_do_not_spawn_without_active_crawler_room()
 	_test_background_essence_drip()
@@ -90,6 +94,12 @@ func _require(condition: bool, message: String) -> void:
 	if not condition:
 		failures += 1
 		push_error(message)
+
+func _place_attached_den(main, connector: Vector2i, tool: String = "place_monster_den") -> Vector2i:
+	var anchor: Vector2i = main.grid.call("monster_den_room_anchor", connector)
+	main.selected_tool = tool
+	main.call("_handle_click", connector)
+	return anchor
 
 func _test_tileset_assets_available() -> void:
 	_require(FileAccess.file_exists("res://assets/tilesets/0x72_DungeonTilesetII_v1.7/atlas_floor-16x16.png"), "0x72 floor atlas should be available")
@@ -429,10 +439,9 @@ func _test_research_unlocks_locked_doors_poison_traps_secret_tunnels_and_looted_
 	crawler.hp = 0
 	crawler.call("simulate_step", main.grid, [], main.resources)
 	_require(main.resources.get_amount("essence") > essence_before, "Claimed Spoils should recover stolen treasure from dead crawlers")
-	var den = secret + Vector2i.RIGHT
-	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.grid.call("dig", coord)
-	main.grid.call("place_monster_den", den)
+	var den_connector = secret + Vector2i.RIGHT
+	var den = main.grid.call("monster_den_room_anchor", den_connector)
+	main.grid.call("place_monster_den", den_connector)
 	var den_tile: DungeonTileData = main.grid.get_tile(den)
 	for i in range(12):
 		main.call("_try_den_spawns")
@@ -500,12 +509,12 @@ func _test_room_identity_profiles_inspect_and_den_context() -> void:
 	get_root().add_child(main)
 	await process_frame
 	var room_origin = main.grid.entrance_tile + Vector2i.RIGHT
-	var door = room_origin + Vector2i.RIGHT
-	var den = door + Vector2i.RIGHT
-	for coord in [room_origin, door, den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.grid.call("dig", coord)
+	var door: Vector2i = room_origin + Vector2i.RIGHT
+	var den_connector: Vector2i = door + Vector2i.RIGHT
+	main.grid.call("dig", door)
 	main.grid.call("place_structure", door, "door")
-	main.grid.call("place_monster_den", den)
+	var den = main.grid.call("monster_den_room_anchor", den_connector)
+	main.grid.call("place_monster_den", den_connector)
 	for coord in main.grid.room_tiles_from(den):
 		main.grid.get_tile(coord).magic = 72.0
 	var profile: Dictionary = main.grid.call("room_profile_from", den)
@@ -514,7 +523,7 @@ func _test_room_identity_profiles_inspect_and_den_context() -> void:
 	main.selected_tool = "inspect"
 	main.call("_handle_click", den)
 	_require(main.ui.info_label.text.contains("Room: Research chamber"), "inspect should show readable room identity")
-	main.grid.call("place_structure", den + Vector2i.RIGHT, "treasure")
+	main.grid.call("place_structure", den + Vector2i(0, 2), "treasure")
 	profile = main.grid.call("room_profile_from", den)
 	_require(profile.get("identity", "") == "research_chamber", "research identity should remain primary over secondary treasure")
 	main.grid.call("clear_structure", den)
@@ -731,14 +740,13 @@ func _test_den_orders_are_contextual_inspect_actions() -> void:
 	for upgrade_id in ["dungeon_praxis", "dungeon_praxis", "hexbound_kin", "ember_pact"]:
 		main.call("_buy_research_upgrade", upgrade_id)
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
-	var den = heart + Vector2i.RIGHT
-	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.selected_tool = "dig"
-		main.call("_handle_click", coord)
 	main.selected_tool = "place_heart"
 	main.call("_handle_click", heart)
-	main.selected_tool = "place_monster_den"
-	main.call("_handle_click", den)
+	var attachment = heart + Vector2i.RIGHT
+	var den_connector = attachment + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", attachment)
+	var den = _place_attached_den(main, den_connector)
 	main.selected_tool = "inspect"
 	main.call("_handle_click", den)
 	_require(main.ui.has_node("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/GuardHeartDenOrderButton"), "inspecting a monster den should show a Guard Heart order button")
@@ -754,27 +762,21 @@ func _test_research_den_generates_knowledge_and_research_tree_upgrades() -> void
 	get_root().add_child(main)
 	await process_frame
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
-	var door = heart + Vector2i.RIGHT
-	var den = door + Vector2i.RIGHT
-	for coord in [
-		heart,
-		door,
-		den,
-		den + Vector2i.RIGHT,
-		den + Vector2i.DOWN,
-		den + Vector2i.RIGHT + Vector2i.DOWN,
-		den + Vector2i(0, -1),
-	]:
+	for coord in [heart]:
 		main.selected_tool = "dig"
 		main.call("_handle_click", coord)
 	main.selected_tool = "place_heart"
 	main.call("_handle_click", heart)
+	var door: Vector2i = heart + Vector2i.RIGHT
+	var den_connector: Vector2i = door + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", door)
 	main.selected_tool = "place_door"
 	main.call("_handle_click", door)
-	main.selected_tool = "magic_seep"
-	main.call("_handle_click", den + Vector2i(0, -1))
-	main.selected_tool = "place_monster_den"
-	main.call("_handle_click", den)
+	var den = _place_attached_den(main, den_connector)
+	for coord in main.grid.room_tiles_from(den):
+		main.grid.get_tile(coord).magic = 72.0
+	main.grid.get_tile(den).magic_source = true
 	main.selected_tool = "inspect"
 	main.call("_handle_click", den)
 	_require(main.ui.has_node("HudRoot/InfoPanel/InfoMargin/InfoContent/DenOrderActions/ResearchDenOrderButton"), "inspecting a den should show a Research order button")
@@ -914,7 +916,7 @@ func _test_planning_heart_is_free_and_fill_refunds() -> void:
 	_require(main.resources.get_amount("essence") == start_essence, "planning fill should erase and refund built floor")
 	main.free()
 
-func _test_planning_fill_clears_secret_tunnel_without_erasing_floor() -> void:
+func _test_remove_handles_structures_sources_secret_tunnels_and_floors() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
 	await process_frame
@@ -928,11 +930,36 @@ func _test_planning_fill_clears_secret_tunnel_without_erasing_floor() -> void:
 	main.call("_handle_click", secret_coord)
 	_require(main.grid.get_tile(secret_coord).secret_tunnel, "test setup should place a planning secret tunnel")
 	_require(main.resources.get_amount("essence") == essence_before - int(main.tool_costs["place_secret_tunnel"]), "placing a secret tunnel should spend its planning cost")
-	main.selected_tool = "fill"
+	main.selected_tool = "remove"
 	main.call("_handle_click", secret_coord)
-	_require(main.grid.get_tile(secret_coord).is_walkable(), "planning fill should erase a secret tunnel without filling in the floor")
-	_require(not main.grid.get_tile(secret_coord).secret_tunnel, "planning fill should clear the secret tunnel flag")
-	_require(main.resources.get_amount("essence") == essence_before, "planning fill should refund the secret tunnel cost")
+	_require(main.grid.get_tile(secret_coord).is_walkable(), "remove should erase a secret tunnel without filling in the floor")
+	_require(not main.grid.get_tile(secret_coord).secret_tunnel, "remove should clear the secret tunnel flag")
+	_require(main.resources.get_amount("essence") == essence_before, "planning remove should refund the secret tunnel cost")
+	main.selected_tool = "place_door"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).structure == "door", "test setup should place a door")
+	main.selected_tool = "remove"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).structure == "", "remove should clear doors")
+	_require(main.grid.get_tile(secret_coord).is_walkable(), "remove should keep floor under removed doors")
+	main.selected_tool = "magic_seep"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).magic_source, "test setup should place a magic source")
+	main.selected_tool = "remove"
+	main.call("_handle_click", secret_coord)
+	_require(not main.grid.get_tile(secret_coord).magic_source, "remove should clear sources")
+	main.selected_tool = "place_treasure"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).structure == "treasure", "test setup should place treasure")
+	main.selected_tool = "remove"
+	main.call("_handle_click", secret_coord)
+	_require(main.grid.get_tile(secret_coord).structure == "", "remove should clear treasure")
+	var floor_coord: Vector2i = secret_coord + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", floor_coord)
+	main.selected_tool = "remove"
+	main.call("_handle_click", floor_coord)
+	_require(main.grid.get_tile(floor_coord).is_diggable(), "remove should fall back to erasing ordinary floor")
 	main.free()
 
 func _test_structure_clearing_resets_all_tile_state() -> void:
@@ -960,10 +987,8 @@ func _test_build_phase_sources_and_monster_den() -> void:
 	get_root().add_child(main)
 	await process_frame
 	var anchor = main.grid.entrance_tile + Vector2i.RIGHT
-	var den_anchor = anchor + Vector2i.RIGHT
-	for coord in [den_anchor, den_anchor + Vector2i.RIGHT, den_anchor + Vector2i.DOWN, den_anchor + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.selected_tool = "dig"
-		main.call("_handle_click", coord)
+	var den_connector = anchor + Vector2i.RIGHT
+	var den_anchor = den_connector + Vector2i.RIGHT
 	main.selected_tool = "magic_seep"
 	main.call("_handle_click", anchor)
 	_require(main.grid.call("get_tile", anchor).magic_source, "magic seep should be available during planning")
@@ -977,8 +1002,9 @@ func _test_build_phase_sources_and_monster_den() -> void:
 	main.call("_handle_click", anchor)
 	_require(main.grid.call("get_tile", anchor).spore_seed, "spore roots should be seedable during planning")
 	main.selected_tool = "place_monster_den"
-	main.call("_handle_click", den_anchor)
-	_require(main.grid.call("get_tile", den_anchor).structure == "monster_den", "monster den should place on a clear 2x2 floor")
+	main.call("_handle_click", den_connector)
+	_require(main.grid.call("get_tile", den_connector).is_walkable(), "monster den should dig a connector tile")
+	_require(main.grid.call("get_tile", den_anchor).structure == "monster_den", "monster den should place as an attached prefab room")
 	_require(main.grid.call("get_tile", den_anchor + Vector2i.RIGHT + Vector2i.DOWN).den_id == main.grid.call("get_tile", den_anchor).den_id, "monster den should mark all 2x2 tiles with one den id")
 	main.free()
 
@@ -986,27 +1012,109 @@ func _test_monster_den_requires_clear_2x2() -> void:
 	var grid = GridScript.new()
 	grid.call("generate_planning_map")
 	var anchor = grid.entrance_tile + Vector2i.RIGHT
-	grid.call("dig", anchor + Vector2i.RIGHT)
-	_require(not grid.call("place_monster_den", anchor), "monster den should reject incomplete 2x2 floor")
-	for coord in [anchor, anchor + Vector2i.RIGHT, anchor + Vector2i.DOWN, anchor + Vector2i.RIGHT + Vector2i.DOWN]:
-		grid.call("dig", coord)
-	grid.call("place_structure", anchor, "treasure")
-	_require(not grid.call("place_monster_den", anchor), "monster den should reject occupied 2x2 floor")
+	_require(not grid.call("place_monster_den", grid.start_center), "monster den should reject unattached room placement")
+	var connector = anchor + Vector2i.RIGHT
+	grid.call("dig", connector)
+	_require(not grid.call("place_monster_den", connector), "monster den should reject a connector that is already floor")
 	grid.free()
+
+func _test_monster_den_places_attached_prefab_room() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var attachment_floor: Vector2i = main.grid.entrance_tile + Vector2i.RIGHT
+	var connector: Vector2i = attachment_floor + Vector2i.RIGHT
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", connector)
+	var anchor: Vector2i = connector + Vector2i.RIGHT
+	_require(main.grid.call("get_tile", connector).is_walkable(), "attached den room should dig a connector from the dungeon edge")
+	_require(main.grid.call("get_tile", anchor).structure == "monster_den", "attached den room should place its den anchor inside the prefab room")
+	_require(main.grid.call("get_tile", anchor).den_kind == "goblin", "attached den room should preserve the chosen den kind")
+	_require(main.grid.call("get_tile", anchor + Vector2i.RIGHT).is_walkable(), "attached den room should dig the prefab room floor")
+	_require(main.grid.call("get_tile", anchor + Vector2i.LEFT).is_walkable(), "attached den room should dig the prefab room floor symmetrically")
+	_require(main.grid.call("shortest_path_length", main.grid.entrance_tile, anchor) >= 0, "attached den room should connect to the existing dungeon")
+	main.free()
+
+func _test_monster_den_hover_previews_full_prefab_room() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var attachment_floor: Vector2i = main.grid.entrance_tile + Vector2i.RIGHT
+	var connector: Vector2i = attachment_floor + Vector2i.RIGHT
+	var expected_tiles: Array[Vector2i] = main.grid.call("monster_den_room_tiles", connector)
+	_require(not expected_tiles.is_empty(), "test setup should have a valid den room connector")
+	_require(main.grid.has_method("placement_preview_coords"), "grid should expose placement preview coords for den room preview")
+	main.selected_tool = "place_monster_den"
+	main.call("_on_grid_hovered_tile_changed", connector)
+	var preview_tiles: Array[Vector2i] = main.grid.call("placement_preview_coords")
+	_require(preview_tiles.size() == expected_tiles.size(), "den hover should preview the full prefab room footprint")
+	for coord in expected_tiles:
+		_require(preview_tiles.has(coord), "den hover preview should include prefab room tile %s" % coord)
+	main.selected_tool = "inspect"
+	main.call("_on_grid_hovered_tile_changed", connector)
+	_require(main.grid.call("placement_preview_coords").is_empty(), "switching away from den tools should clear placement preview")
+	main.free()
+
+func _test_prefab_rooms_cannot_be_expanded_or_partially_filled_by_hand() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var attachment_floor: Vector2i = main.grid.entrance_tile + Vector2i.RIGHT
+	var connector: Vector2i = attachment_floor + Vector2i.RIGHT
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", connector)
+	var anchor: Vector2i = connector + Vector2i.RIGHT
+	var protected_stone: Vector2i = anchor + Vector2i(0, -2)
+	_require(main.grid.call("get_tile", protected_stone).is_diggable(), "test setup should leave stone directly beside the den room")
+	main.selected_tool = "dig"
+	main.call("_handle_click", protected_stone)
+	_require(main.grid.call("get_tile", protected_stone).is_diggable(), "dig should refuse to expand a prefab den room")
+	main.selected_tool = "fill"
+	main.call("_handle_click", anchor)
+	_require(main.grid.call("get_tile", anchor).is_walkable(), "fill should refuse to erase one tile out of a prefab den room")
+	_require(main.grid.call("get_tile", anchor).structure == "monster_den", "fill should not clear the den core as a partial prefab edit")
+	var ordinary_stone: Vector2i = anchor + Vector2i(5, 0)
+	main.selected_tool = "dig"
+	main.call("_handle_click", ordinary_stone)
+	_require(main.grid.call("get_tile", ordinary_stone).is_walkable(), "ordinary digging away from prefab rooms should still work")
+	main.free()
+
+func _test_remove_deletes_whole_prefab_room() -> void:
+	var main = MainScene.instantiate()
+	get_root().add_child(main)
+	await process_frame
+	var attachment_floor: Vector2i = main.grid.entrance_tile + Vector2i.RIGHT
+	var connector: Vector2i = attachment_floor + Vector2i.RIGHT
+	var prefab_tiles: Array[Vector2i] = main.grid.call("monster_den_room_tiles", connector)
+	var essence_before: int = main.resources.get_amount("essence")
+	main.selected_tool = "place_monster_den"
+	main.call("_handle_click", connector)
+	_require(main.resources.get_amount("essence") == essence_before - int(main.tool_costs["place_monster_den"]), "test setup should spend den cost")
+	var anchor: Vector2i = connector + Vector2i.RIGHT
+	_require(main.grid.get_tile(anchor).prefab_room_id != -1, "test setup should mark prefab room ownership")
+	main.selected_tool = "remove"
+	main.call("_handle_click", anchor)
+	for coord in prefab_tiles:
+		_require(main.grid.get_tile(coord).is_diggable(), "remove should restore prefab room tile %s to stone" % coord)
+		_require(main.grid.get_tile(coord).prefab_room_id == -1, "remove should clear prefab ownership at %s" % coord)
+	_require(main.resources.get_amount("essence") == essence_before, "planning remove should refund prefab room cost")
+	main.free()
 
 func _test_carrion_den_spawns_mites_like_a_den() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
 	await process_frame
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
-	var den = heart + Vector2i.RIGHT
-	for coord in [heart, den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
+	for coord in [heart]:
 		main.selected_tool = "dig"
 		main.call("_handle_click", coord)
 	main.selected_tool = "place_heart"
 	main.call("_handle_click", heart)
-	main.selected_tool = "place_carrion_den"
-	main.call("_handle_click", den)
+	var attachment = heart + Vector2i.RIGHT
+	var den_connector = attachment + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", attachment)
+	var den = _place_attached_den(main, den_connector, "place_carrion_den")
 	var den_tile: DungeonTileData = main.grid.call("get_tile", den)
 	_require(den_tile.structure == "monster_den", "carrion den should use the den footprint")
 	_require(den_tile.den_kind == "carrion", "carrion den should store a carrion den kind")
@@ -1039,14 +1147,13 @@ func _test_den_orders_are_assigned_and_inherited() -> void:
 	get_root().add_child(main)
 	await process_frame
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
-	var den = heart + Vector2i.RIGHT
-	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.selected_tool = "dig"
-		main.call("_handle_click", coord)
 	main.selected_tool = "place_heart"
 	main.call("_handle_click", heart)
-	main.selected_tool = "place_monster_den"
-	main.call("_handle_click", den)
+	var attachment = heart + Vector2i.RIGHT
+	var den_connector = attachment + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", attachment)
+	var den = _place_attached_den(main, den_connector)
 	main.selected_tool = "den_order_guard_heart"
 	main.call("_handle_click", den)
 	_require(main.grid.call("get_tile", den).den_order == "guard_heart", "clicking a den order should store that order on the den")
@@ -1109,7 +1216,7 @@ func _test_live_heart_can_be_moved_for_essence() -> void:
 	_require(main.resources.get_amount("essence") == before - 20, "moving the live Heart should cost essence")
 	main.free()
 
-func _test_live_fill_removes_door() -> void:
+func _test_live_remove_clears_door_before_floor_fill() -> void:
 	var main = MainScene.instantiate()
 	get_root().add_child(main)
 	await process_frame
@@ -1122,10 +1229,10 @@ func _test_live_fill_removes_door() -> void:
 	main.selected_tool = "place_door"
 	main.call("_handle_click", door_coord)
 	main.call("_start_dungeon")
-	main.selected_tool = "fill"
+	main.selected_tool = "remove"
 	main.call("_handle_click", door_coord)
-	_require(main.grid.call("get_tile", door_coord).structure == "", "live fill should remove doors/structures before filling floor")
-	_require(main.grid.call("get_tile", door_coord).is_walkable(), "first live fill on a door should leave the floor in place")
+	_require(main.grid.call("get_tile", door_coord).structure == "", "live remove should remove doors/structures before filling floor")
+	_require(main.grid.call("get_tile", door_coord).is_walkable(), "live remove on a door should leave the floor in place")
 	main.free()
 
 func _test_essence_can_seed_emergency_mite() -> void:
@@ -1265,17 +1372,17 @@ func _test_monster_den_spawns_by_environment() -> void:
 	for upgrade_id in ["dungeon_praxis", "dungeon_praxis", "hexbound_kin", "ember_pact"]:
 		main.call("_buy_research_upgrade", upgrade_id)
 	var heart = main.grid.entrance_tile + Vector2i.RIGHT
-	var den = heart + Vector2i.RIGHT
-	for coord in [den, den + Vector2i.RIGHT, den + Vector2i.DOWN, den + Vector2i.RIGHT + Vector2i.DOWN]:
-		main.selected_tool = "dig"
-		main.call("_handle_click", coord)
+	main.selected_tool = "place_heart"
+	main.call("_handle_click", heart)
+	var attachment = heart + Vector2i.RIGHT
+	var den_connector = attachment + Vector2i.RIGHT
+	main.selected_tool = "dig"
+	main.call("_handle_click", attachment)
+	var den = _place_attached_den(main, den_connector)
+	for coord in main.grid.room_tiles_from(den):
 		var tile = main.grid.call("get_tile", coord)
 		tile.magic = 92.0
 		tile.temperature = 88.0
-	main.selected_tool = "place_heart"
-	main.call("_handle_click", heart)
-	main.selected_tool = "place_monster_den"
-	main.call("_handle_click", den)
 	main.call("_start_dungeon")
 	main.creatures.clear()
 	for i in range(22):
